@@ -2,19 +2,22 @@
 """Simple LoRA Training for Qwen2.5-Coder - 8x B200 GPUs."""
 import os
 import sys
+import json
 
 # Fix deprecated env var warning
 if "PYTORCH_CUDA_ALLOC_CONF" in os.environ:
     os.environ["PYTORCH_ALLOC_CONF"] = os.environ.pop("PYTORCH_CUDA_ALLOC_CONF")
 
 import torch
+import deepspeed
 from datasets import load_from_disk
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from peft import LoraConfig, get_peft_model
 from trl import SFTConfig, SFTTrainer
 
 def main():
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
     
     # Model selection
     MODELS = {
@@ -24,7 +27,7 @@ def main():
     model_arg = sys.argv[1] if len(sys.argv) > 1 else "14b"
     MODEL = MODELS.get(model_arg, MODELS["14b"])
     
-    print(f"[Rank {local_rank}] Training: {MODEL}", flush=True)
+    print(f"[Rank {local_rank}/{world_size}] Training: {MODEL}", flush=True)
 
     # Load tokenizer
     print(f"[Rank {local_rank}] Loading tokenizer...", flush=True)
@@ -36,16 +39,22 @@ def main():
     dataset = load_from_disk("./tokenized_data", keep_in_memory=False)
     print(f"[Rank {local_rank}] Dataset: {len(dataset)} examples", flush=True)
 
-    # Load model - let DeepSpeed handle sharding via Trainer
-    print(f"[Rank {local_rank}] Loading model...", flush=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL,
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True,
-        low_cpu_mem_usage=True,
-        attn_implementation="flash_attention_2",
-    )
-    print(f"[Rank {local_rank}] Model loaded!", flush=True)
+    # Load DeepSpeed config for ZeRO-3 init
+    with open("ds_config.json", "r") as f:
+        ds_config = json.load(f)
+
+    # Load model INSIDE deepspeed.zero.Init() context
+    # This partitions weights across GPUs immediately, avoiding 8x RAM spike
+    print(f"[Rank {local_rank}] Loading model with ZeRO-3 init (distributed load)...", flush=True)
+    with deepspeed.zero.Init(config_dict_or_path=ds_config):
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL,
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True,
+            low_cpu_mem_usage=True,
+            attn_implementation="flash_attention_2",
+        )
+    print(f"[Rank {local_rank}] Model loaded (ZeRO-3 partitioned)!", flush=True)
 
     # Setup LoRA
     print(f"[Rank {local_rank}] Setting up LoRA...", flush=True)
