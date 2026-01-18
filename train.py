@@ -58,13 +58,9 @@ def main():
     MODEL = MODELS.get(model_arg, MODELS["32b"])
     log(local_rank, f"MODEL: {MODEL}")
 
-    # Set memory limits before any CUDA operations
-    import resource
-    # Limit memory to 100GB per process (should be plenty for 32B model + overhead)
-    soft_limit = 100 * 1024 * 1024 * 1024  # 100GB in bytes
-    hard_limit = soft_limit * 2  # 200GB hard limit
-    resource.setrlimit(resource.RLIMIT_AS, (soft_limit, hard_limit))
-    log(local_rank, f"MEMORY: set RLIMIT_AS to {soft_limit//(1024**3)}GB")
+    # Note: Removed RLIMIT_AS - it was causing std::bad_alloc during peft import
+    # because CUDA/GPU libraries reserve large virtual address spaces for memory mapping
+    log(local_rank, "MEMORY: no RLIMIT_AS set (CUDA needs large virtual address space)")
 
     # =========================================================================
     # CRITICAL: Use file lock to serialize ALL heavy operations
