@@ -133,8 +133,57 @@ EOF
 fi
 echo "Dataset: $(wc -l < $DATASET) examples"
 
-# Step 4: Setup swap space (prevents std::bad_alloc)
-echo "[4/5] Setting up swap space..."
+# Step 4: Pre-tokenize dataset (Single Process - Prevents 8x RAM spike)
+echo "[4/6] Pre-tokenizing dataset (Single Process)..."
+if [ ! -d "./tokenized_data" ]; then
+    python3 << 'EOF'
+import os
+from datasets import load_dataset
+from transformers import AutoTokenizer
+
+# Determine model based on MODEL_SIZE
+model_size = os.getenv("MODEL_SIZE", "32b")
+models = {
+    "32b": "Qwen/Qwen2.5-Coder-32B-Instruct",
+    "14b": "Qwen/Qwen2.5-Coder-14B-Instruct",
+}
+model_id = models.get(model_size, models["32b"])
+
+print(f"Loading tokenizer for {model_id}...")
+tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+tokenizer.pad_token = tokenizer.eos_token
+
+print("Loading dataset...")
+dataset = load_dataset("json", data_files="./curated_1m_dataset.jsonl", split="train")
+
+print("Tokenizing dataset (this may take a while)...")
+def tokenize_function(examples):
+    # Apply chat template and tokenize
+    texts = []
+    for msg_list in examples["messages"]:
+        text = tokenizer.apply_chat_template(msg_list, tokenize=False)
+        texts.append(text)
+    return tokenizer(texts, truncation=True, max_length=2048, padding=False)
+
+tokenized_dataset = dataset.map(
+    tokenize_function,
+    batched=True,
+    batch_size=1000,
+    num_proc=min(os.cpu_count(), 8),  # Use CPU cores but limit to 8
+    remove_columns=dataset.column_names,
+    desc="Tokenizing"
+)
+
+print("Saving tokenized dataset to disk...")
+tokenized_dataset.save_to_disk("./tokenized_data")
+print("Pre-tokenization complete!")
+EOF
+else
+    echo "Pre-tokenized dataset already exists, skipping..."
+fi
+
+# Step 5: Setup swap space (prevents std::bad_alloc)
+echo "[5/6] Setting up swap space..."
 if [ ! -f /swapfile ]; then
     echo "Creating 128GB swap file..."
     sudo fallocate -l 128G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1G count=128 2>/dev/null
@@ -144,19 +193,30 @@ if [ ! -f /swapfile ]; then
     echo "Swap enabled: $(free -h | grep Swap)"
 fi
 
-# Step 5: Start training
-echo "[5/5] Starting QLoRA training with DeepSpeed ZeRO-3..."
+# Step 6: Start training
+echo "[6/6] Starting QLoRA training with DeepSpeed ZeRO-3..."
 
 # Increase system limits for 8-way distributed training
 ulimit -n 65535 2>/dev/null || true
 export MAX_JOBS=8
 export MALLOC_CONF="dirty_decay_ms:1000,muzzy_decay_ms:1000"
 
+# Prevent thread explosion
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+
+# Force HuggingFace to use memory-mapped cache
+export HF_DATASETS_OFFLINE=0
+export HF_DATASETS_COPY_FROM_CACHE=0
+
+# Export MODEL_SIZE for train.py
+export MODEL_SIZE=$MODEL_SIZE
+
 # Use DeepSpeed ZeRO-3 to shard model across 8 GPUs (prevents OOM)
 # DeepSpeed handles model partitioning, preventing 8x CPU RAM usage
-# NOTE: --multi_gpu and --use_deepspeed are mutually exclusive
 accelerate launch \
     --num_processes 8 \
+    --num_machines 1 \
     --use_deepspeed \
     --deepspeed_config_file ds_config.json \
     --mixed_precision bf16 \

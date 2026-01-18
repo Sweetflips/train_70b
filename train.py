@@ -2,7 +2,10 @@
 """QLoRA Training - Production script for 8x B200."""
 import torch
 import sys
-from datasets import load_dataset
+import os
+import deepspeed
+from accelerate import Accelerator
+from datasets import load_from_disk
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TrainingArguments
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTTrainer
@@ -23,11 +26,14 @@ def main():
     DATA = "./curated_1m_dataset.jsonl"
     print(f"Training: {MODEL}")
 
+    print("Initializing accelerator...")
+    accelerator = Accelerator()
+
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
 
-    print("Loading model...")
+    print("Loading model with DeepSpeed ZeRO-3 initialization...")
     # Use dtype instead of torch_dtype (deprecated)
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -36,15 +42,16 @@ def main():
         bnb_4bit_use_double_quant=True
     )
 
-    # Use low_cpu_mem_usage to prevent OOM during model loading
-    # DeepSpeed will handle device placement, so don't use device_map here
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL,
-        quantization_config=bnb_config,
-        trust_remote_code=True,
-        dtype=torch.bfloat16,
-        low_cpu_mem_usage=True,  # Critical: prevents RAM spike during loading
-    )
+    # deepspeed.zero.Init() ensures model is sharded during loading
+    # Each process only allocates 1/8th of the model (prevents 8x RAM spike)
+    with deepspeed.zero.Init():
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL,
+            quantization_config=bnb_config,
+            trust_remote_code=True,
+            dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,  # Critical: prevents RAM spike during loading
+        )
 
     print("Preparing model for training...")
     model = prepare_model_for_kbit_training(model)
@@ -56,23 +63,28 @@ def main():
     ))
     model.print_trainable_parameters()
 
-    print("Loading dataset (memory-mapped)...")
-    # Memory-mapped loading - doesn't load entire dataset into RAM
-    dataset = load_dataset("json", data_files=DATA, split="train", streaming=False)
-    
-    print("Processing dataset (batched to reduce memory)...")
-    def fmt(ex):
-        # Data is now standardized to "messages" format in start.sh
-        return {"text": tokenizer.apply_chat_template(ex["messages"], tokenize=False)}
-
-    # Use batched map to reduce memory spikes
-    dataset = dataset.map(
-        fmt,
-        remove_columns=dataset.column_names,
-        batched=True,
-        batch_size=1000,  # Process in batches to avoid RAM spike
-        desc="Formatting dataset"
-    )
+    print("Loading pre-tokenized dataset from disk...")
+    # Load pre-tokenized data (saved in start.sh step 4)
+    # This prevents 8 processes from tokenizing 1M rows simultaneously
+    try:
+        dataset = load_from_disk("./tokenized_data")
+        print("Pre-tokenized dataset loaded successfully!")
+    except Exception as e:
+        print(f"Warning: Could not load pre-tokenized dataset: {e}")
+        print("Falling back to on-the-fly tokenization (may use more RAM)...")
+        from datasets import load_dataset
+        dataset = load_dataset("json", data_files=DATA, split="train", streaming=False)
+        
+        def fmt(ex):
+            return {"text": tokenizer.apply_chat_template(ex["messages"], tokenize=False)}
+        
+        dataset = dataset.map(
+            fmt,
+            remove_columns=dataset.column_names,
+            batched=True,
+            batch_size=1000,
+            desc="Formatting dataset"
+        )
 
     # Use TrainingArguments with DeepSpeed ZeRO-3 for memory efficiency
     training_args = TrainingArguments(
