@@ -135,8 +135,12 @@ echo "Dataset: $(wc -l < $DATASET) examples"
 
 # Step 4: Start training
 echo "[4/4] Starting QLoRA training..."
-# Use existing accelerate config (DeepSpeed ZeRO-2) instead of overriding
-accelerate launch train.py $MODEL_SIZE
+# Use regular DDP multi-GPU training (simpler than DeepSpeed for B200 GPUs)
+accelerate launch \
+    --multi_gpu \
+    --num_processes 8 \
+    --mixed_precision bf16 \
+    train.py $MODEL_SIZE
 
 echo "============================================"
 echo "Training Complete!"
