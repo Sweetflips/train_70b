@@ -40,11 +40,12 @@ def main():
     config = AutoConfig.from_pretrained(MODEL, trust_remote_code=True)
     
     # 2. Initialize model on "meta" device (uses 0 RAM)
-    # DeepSpeed will load weights directly to VRAM
+    # DeepSpeed will load weights directly to VRAM during training initialization
     with init_empty_weights():
         model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.bfloat16, trust_remote_code=True)
     
     print("Model structure initialized on meta device (0 CPU RAM used)")
+    print("DeepSpeed will load weights directly to GPUs during trainer initialization")
 
     print("Preparing model for LoRA training...")
     # Apply LoRA (not QLoRA - no quantization needed on B200s)
