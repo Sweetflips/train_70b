@@ -9,6 +9,15 @@ NUM_GPUS=8
 # Export MODEL_SIZE for use in Python scripts
 export MODEL_SIZE
 
+# Nuclear environment variables - Force Python to release memory immediately
+export MALLOC_CONF="dirty_decay_ms:0,muzzy_decay_ms:0"
+# Limit threading overhead
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+# Prevent HuggingFace from caching 1M rows in RAM
+export HF_DATASETS_OFFLINE=1
+export HF_DATASETS_COPY_FROM_CACHE=0
+
 echo "============================================"
 echo "Sweetflips Training Pipeline"
 echo "Model: $MODEL_SIZE | GPUs: $NUM_GPUS"
@@ -211,33 +220,23 @@ if [ ! -f /swapfile ]; then
 fi
 
 # Step 6: Start training
-echo "[6/6] Starting QLoRA training with DeepSpeed ZeRO-3..."
+echo "[6/6] Starting BF16 LoRA training with DeepSpeed ZeRO-2..."
 
 # Increase system limits for 8-way distributed training
 ulimit -n 65535 2>/dev/null || true
 export MAX_JOBS=8
-export MALLOC_CONF="dirty_decay_ms:1000,muzzy_decay_ms:1000"
-
-# Prevent thread explosion
-export OMP_NUM_THREADS=1
-export MKL_NUM_THREADS=1
 
 # Prevent HuggingFace from over-threading
 export HF_DATASETS_NUM_PROC=1
 
-# Force HuggingFace to use memory-mapped cache
-export HF_DATASETS_OFFLINE=0
-export HF_DATASETS_COPY_FROM_CACHE=0
-
-# Use DeepSpeed ZeRO-3 to shard model across 8 GPUs (prevents OOM)
-# DeepSpeed handles model partitioning, preventing 8x CPU RAM usage
+# Use DeepSpeed ZeRO-2 (faster than ZeRO-3 for 32B on B200s)
+# Meta-device loading ensures zero CPU RAM usage during model initialization
 accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
-    --machine_rank 0 \
+    --mixed_precision bf16 \
     --use_deepspeed \
     --deepspeed_config_file ds_config.json \
-    --mixed_precision bf16 \
     train.py $MODEL_SIZE
 
 echo "============================================"

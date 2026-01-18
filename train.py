@@ -6,7 +6,8 @@ import os
 import deepspeed
 from accelerate import Accelerator
 from datasets import load_from_disk
-from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, TrainingArguments
+from accelerate import init_empty_weights
 from peft import LoraConfig, get_peft_model
 from trl import SFTTrainer
 
@@ -33,26 +34,17 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
 
-    print("Loading model with sequential loading (prevents 8x RAM spike)...")
-    # THE FIX: Sequential Loading - Each process waits for the previous one
-    # Instead of 8 processes loading 64GB each (512GB total), only one loads at a time (64GB)
-    import time
-    for i in range(accelerator.num_processes):
-        if accelerator.local_process_index == i:
-            print(f"Process {i}/{accelerator.num_processes} is loading the model...")
-            # Use BF16 LoRA instead of 4-bit QLoRA (B200s have enough VRAM)
-            # This avoids bitsandbytes CPU overhead that triggers std::bad_alloc
-            with deepspeed.zero.Init():
-                model = AutoModelForCausalLM.from_pretrained(
-                    MODEL,
-                    trust_remote_code=True,
-                    dtype=torch.bfloat16,  # BF16, not 4-bit
-                    low_cpu_mem_usage=True,  # Critical: prevents RAM spike
-                    device_map=None,  # DeepSpeed handles placement
-                )
-            print(f"Process {i} finished loading model")
-        # Wait for this process to finish before the next one starts
-        accelerator.wait_for_everyone()
+    print("Loading model with meta-device (zero CPU RAM usage)...")
+    # THE FIX: Meta-device loading - Model weights never touch CPU RAM
+    # 1. Load config only (uses 0 RAM)
+    config = AutoConfig.from_pretrained(MODEL, trust_remote_code=True)
+    
+    # 2. Initialize model on "meta" device (uses 0 RAM)
+    # DeepSpeed will load weights directly to VRAM
+    with init_empty_weights():
+        model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.bfloat16, trust_remote_code=True)
+    
+    print("Model structure initialized on meta device (0 CPU RAM used)")
 
     print("Preparing model for LoRA training...")
     # Apply LoRA (not QLoRA - no quantization needed on B200s)
@@ -87,12 +79,12 @@ def main():
             desc="Formatting dataset"
         )
 
-    # Use TrainingArguments with DeepSpeed ZeRO-3 for memory efficiency
+    # Use TrainingArguments with DeepSpeed ZeRO-2 for memory efficiency
     training_args = TrainingArguments(
         output_dir="./output",
         num_train_epochs=1,
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=128,
+        per_device_train_batch_size=2,  # ZeRO-2 can handle batch_size=2
+        gradient_accumulation_steps=64,  # Reduced since batch_size increased
         learning_rate=1e-4,
         warmup_ratio=0.03,
         bf16=True,
@@ -101,10 +93,10 @@ def main():
         optim="adamw_torch",
         gradient_checkpointing=True,
         report_to="none",
-        dataloader_num_workers=0,  # Critical: prevents 64 threads (8 processes × 8 workers)
+        dataloader_num_workers=0,  # Critical: keep data loading on main thread
         dataloader_pin_memory=False,  # Saves RAM
         group_by_length=True,  # Helps with VRAM efficiency
-        deepspeed="ds_config.json",  # DeepSpeed ZeRO-3 config
+        deepspeed="ds_config.json",  # DeepSpeed ZeRO-2 config
     )
 
     print("Initializing trainer...")
