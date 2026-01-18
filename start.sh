@@ -21,14 +21,28 @@ pip install -q torch transformers datasets accelerate peft trl bitsandbytes hugg
 
 # Step 2: Download models
 echo "[2/4] Downloading Qwen models from HuggingFace..."
-export HUGGING_FACE_HUB_TOKEN="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"
+# Check for HuggingFace token (supports both HF_TOKEN and HUGGING_FACE_HUB_TOKEN)
+HF_TOKEN=${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}
+if [ -z "$HF_TOKEN" ]; then
+    echo "WARNING: No HF_TOKEN or HUGGING_FACE_HUB_TOKEN set. Some models may require authentication."
+    echo "Set HF_TOKEN environment variable in RunPod for authenticated downloads."
+else
+    echo "Using HuggingFace token for authenticated downloads..."
+    export HF_TOKEN
+    export HUGGING_FACE_HUB_TOKEN=$HF_TOKEN
+fi
+
 python3 << 'EOF'
 import os
 from huggingface_hub import snapshot_download, login
 
-token = os.getenv("HUGGING_FACE_HUB_TOKEN")
+# Check for token in environment (supports both variable names)
+token = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
 if token:
+    print("Authenticating with HuggingFace...")
     login(token=token)
+else:
+    print("No token provided - proceeding without authentication")
 
 models = [
     "Qwen/Qwen2.5-Coder-14B-Instruct",
@@ -38,7 +52,7 @@ models = [
 
 for m in models:
     print(f"Downloading {m}...")
-    snapshot_download(repo_id=m)
+    snapshot_download(repo_id=m, token=token)
     print(f"Done: {m}")
 
 print("All models cached!")
@@ -51,20 +65,26 @@ if [ ! -f "$DATASET" ]; then
     python3 << 'EOF'
 from datasets import load_dataset
 import json
+import os
+
+# Use token if available for dataset downloads
+token = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
+if token:
+    print("Using HuggingFace token for dataset downloads...")
 
 print("Downloading datasets from HuggingFace...")
 
 # nvidia/OpenCodeInstruct - verified exists
 print("1/3 OpenCodeInstruct (500K)...")
-ds1 = load_dataset("nvidia/OpenCodeInstruct", split="train[:500000]")
+ds1 = load_dataset("nvidia/OpenCodeInstruct", split="train[:500000]", token=token)
 
 # bangnbx/cursor_tools_50k - verified exists  
 print("2/3 Cursor Tools (50K)...")
-ds2 = load_dataset("bangnbx/cursor_tools_50k", split="train")
+ds2 = load_dataset("bangnbx/cursor_tools_50k", split="train", token=token)
 
 # glaiveai/glaive-function-calling-v2 - tool calling dataset
 print("3/3 Glaive Function Calling (450K)...")
-ds3 = load_dataset("glaiveai/glaive-function-calling-v2", split="train[:450000]")
+ds3 = load_dataset("glaiveai/glaive-function-calling-v2", split="train[:450000]", token=token)
 
 print("Writing curated_1m_dataset.jsonl...")
 with open("curated_1m_dataset.jsonl", "w") as f:
