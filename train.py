@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 LoRA Training for Qwen2.5-Coder - 8x B200 GPUs
-Uses PyTorch FSDP instead of DeepSpeed to avoid std::bad_alloc issues.
+Uses file-based locking to serialize initialization before torch.distributed is available.
 """
 import os
 import sys
-import json
+import time
 import traceback
 import gc
+import fcntl
 
 def log(rank, msg):
     """Verbose logging with rank prefix."""
@@ -48,8 +49,6 @@ def main():
     log(local_rank, f"INIT: rank={local_rank}/{world_size}")
     log(local_rank, "="*60)
     
-    log_memory(local_rank, "START")
-    
     # Model selection
     MODELS = {
         "14b": "Qwen/Qwen2.5-Coder-14B-Instruct",
@@ -59,31 +58,82 @@ def main():
     MODEL = MODELS.get(model_arg, MODELS["14b"])
     log(local_rank, f"MODEL: {MODEL}")
 
-    # Import libraries
-    log(local_rank, "IMPORT: torch...")
-    import torch
-    log(local_rank, f"IMPORT: torch OK (v{torch.__version__})")
+    # =========================================================================
+    # CRITICAL: Use file lock to serialize ALL heavy operations
+    # This prevents multiple processes from doing heavy allocations simultaneously
+    # =========================================================================
+    lock_file = "/tmp/training_init.lock"
     
-    # Set device for this rank
-    torch.cuda.set_device(local_rank)
-    device = torch.device(f"cuda:{local_rank}")
-    log(local_rank, f"DEVICE: {device}")
+    log(local_rank, f"LOCK: waiting for exclusive access...")
+    with open(lock_file, 'w') as lock_fd:
+        # Get exclusive lock - only one process at a time can proceed
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        log(local_rank, f"LOCK: acquired! Starting initialization...")
+        
+        try:
+            log_memory(local_rank, "START")
+            
+            # Import torch
+            log(local_rank, "IMPORT: torch...")
+            import torch
+            log(local_rank, f"IMPORT: torch OK (v{torch.__version__})")
+            
+            # Set device
+            torch.cuda.set_device(local_rank)
+            device = torch.device(f"cuda:{local_rank}")
+            log(local_rank, f"DEVICE: {device}")
+            
+            # Warm up CUDA on this device
+            log(local_rank, "CUDA: warming up...")
+            _ = torch.zeros(1, device=device)
+            torch.cuda.synchronize(device)
+            log(local_rank, "CUDA: ready")
+            
+            # Import heavy libraries (one process at a time due to lock)
+            log(local_rank, "IMPORT: transformers...")
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            log(local_rank, "IMPORT: transformers OK")
+            
+            log(local_rank, "IMPORT: peft...")
+            from peft import LoraConfig, get_peft_model
+            log(local_rank, "IMPORT: peft OK")
+            
+            log(local_rank, "IMPORT: trl...")
+            from trl import SFTConfig, SFTTrainer
+            log(local_rank, "IMPORT: trl OK")
+            
+            log(local_rank, "IMPORT: datasets...")
+            from datasets import load_from_disk
+            log(local_rank, "IMPORT: datasets OK")
+            
+            log_memory(local_rank, "POST-IMPORT")
+            
+            # Force garbage collection
+            gc.collect()
+            torch.cuda.empty_cache()
+            
+        finally:
+            # Release lock
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            log(local_rank, f"LOCK: released")
     
-    # Initialize distributed
+    # Small delay to let the next process grab the lock
+    time.sleep(0.2)
+    
+    # Now all processes can initialize distributed together
     log(local_rank, "DISTRIBUTED: initializing...")
+    import torch
     if not torch.distributed.is_initialized():
         torch.distributed.init_process_group(backend="nccl")
     log(local_rank, f"DISTRIBUTED: OK (rank={torch.distributed.get_rank()})")
     
-    # Import other libraries (no DeepSpeed!)
-    log(local_rank, "IMPORT: transformers, peft, trl, datasets...")
+    # Re-import (they're cached, so it's fast)
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import LoraConfig, get_peft_model
     from trl import SFTConfig, SFTTrainer
     from datasets import load_from_disk
-    log(local_rank, "IMPORT: all libraries OK")
     
-    log_memory(local_rank, "POST-IMPORT")
+    device = torch.device(f"cuda:{local_rank}")
 
     # Load tokenizer
     log(local_rank, "TOKENIZER: loading...")
@@ -101,25 +151,32 @@ def main():
     # Barrier before model load
     torch.distributed.barrier()
     
-    # Load model - only rank 0 loads first, then others follow
-    # This prevents 8x simultaneous disk reads
-    log(local_rank, "MODEL: loading...")
-    for loading_rank in range(world_size):
-        if local_rank == loading_rank:
-            log(local_rank, "MODEL: my turn to load...")
+    # Load model - serialize with file lock to prevent disk/memory contention
+    log(local_rank, "MODEL: waiting for lock to load model...")
+    with open(lock_file, 'w') as lock_fd:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        log(local_rank, "MODEL: loading...")
+        try:
             model = AutoModelForCausalLM.from_pretrained(
                 MODEL,
                 torch_dtype=torch.bfloat16,
                 trust_remote_code=True,
                 low_cpu_mem_usage=True,
                 attn_implementation="flash_attention_2",
-                device_map={"": device},  # Load directly to this GPU
+                device_map={"": device},
             )
             log(local_rank, "MODEL: loaded!")
-            log_memory(local_rank, "POST-MODEL-LOAD")
+            log_memory(local_rank, "POST-MODEL")
             gc.collect()
             torch.cuda.empty_cache()
-        torch.distributed.barrier()
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    
+    time.sleep(0.2)
+    
+    # Barrier after model load
+    torch.distributed.barrier()
+    log(local_rank, "MODEL: all ranks have loaded model")
     
     # Setup LoRA
     log(local_rank, "LORA: configuring...")
@@ -140,14 +197,14 @@ def main():
     
     log_memory(local_rank, "POST-LORA")
 
-    # Training config - use DDP instead of DeepSpeed
-    log(local_rank, "CONFIG: creating SFTConfig (DDP mode)...")
+    # Training config - use DDP
+    log(local_rank, "CONFIG: creating SFTConfig...")
     sft_config = SFTConfig(
         output_dir="./output",
         num_train_epochs=1,
         max_seq_length=2048,
-        per_device_train_batch_size=2,  # Reduced for safety
-        gradient_accumulation_steps=4,  # Compensate with more accumulation
+        per_device_train_batch_size=2,
+        gradient_accumulation_steps=4,
         learning_rate=2e-5,
         warmup_ratio=0.03,
         bf16=True,
@@ -162,15 +219,7 @@ def main():
         dataset_text_field=None,
         dataloader_num_workers=0,
         dataloader_pin_memory=False,
-        # NO deepspeed - use native DDP
         ddp_find_unused_parameters=False,
-        # FSDP config for sharding
-        fsdp="full_shard auto_wrap",
-        fsdp_config={
-            "fsdp_transformer_layer_cls_to_wrap": ["Qwen2DecoderLayer"],
-            "fsdp_offload_params": False,
-            "fsdp_state_dict_type": "FULL_STATE_DICT",
-        },
     )
     log(local_rank, "CONFIG: OK")
 
