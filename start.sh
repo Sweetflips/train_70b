@@ -11,13 +11,16 @@ echo "Sweetflips Training Pipeline"
 echo "Model: $MODEL_SIZE | GPUs: $NUM_GPUS"
 echo "============================================"
 
-# Step 1: Setup venv and install dependencies
+# Step 1: Check/install dependencies
 echo "[1/4] Setting up environment..."
-if [ ! -d "venv" ]; then
+# Skip venv in container environments (RunPod Serverless)
+if [ -z "$RUNPOD_POD_ID" ] && [ ! -d "venv" ]; then
     python3 -m venv venv
+    source venv/bin/activate
+elif [ -d "venv" ]; then
+    source venv/bin/activate
 fi
-source venv/bin/activate
-pip install -q torch transformers datasets accelerate peft trl bitsandbytes huggingface_hub
+pip install -q torch transformers datasets accelerate peft trl bitsandbytes huggingface_hub 2>/dev/null || true
 
 # Step 2: Download models
 echo "[2/4] Downloading Qwen models from HuggingFace..."
