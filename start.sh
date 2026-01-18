@@ -14,8 +14,7 @@ export MALLOC_CONF="dirty_decay_ms:0,muzzy_decay_ms:0"
 # Limit threading overhead
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
-# Prevent HuggingFace from caching 1M rows in RAM
-export HF_DATASETS_OFFLINE=1
+# Prevent HuggingFace from duplicating dataset in RAM
 export HF_DATASETS_COPY_FROM_CACHE=0
 
 echo "============================================"
@@ -67,11 +66,12 @@ model_size = "$MODEL_SIZE"
 models = {
     "14b": "Qwen/Qwen2.5-Coder-14B-Instruct",
     "32b": "Qwen/Qwen2.5-Coder-32B-Instruct",
+    "72b": "Qwen/Qwen2.5-72B-Instruct",
 }
 
 if model_size not in models:
-    print(f"Skipping model download for {model_size} - using base models only")
-    sys.exit(0)
+    print(f"Unknown model size {model_size}, defaulting to 72b")
+    model_size = "72b"
 
 model = models[model_size]
 print(f"Downloading {model}...")
@@ -153,12 +153,13 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 
 # Determine model based on MODEL_SIZE
-model_size = os.getenv("MODEL_SIZE", "32b")
+model_size = os.getenv("MODEL_SIZE", "72b")
 models = {
+    "72b": "Qwen/Qwen2.5-72B-Instruct",
     "32b": "Qwen/Qwen2.5-Coder-32B-Instruct",
     "14b": "Qwen/Qwen2.5-Coder-14B-Instruct",
 }
-model_id = models.get(model_size, models["32b"])
+model_id = models.get(model_size, models["72b"])
 
 print(f"Loading tokenizer for {model_id}...")
 tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
@@ -210,14 +211,22 @@ fi
 
 # Step 5: Setup swap space (prevents std::bad_alloc)
 echo "[5/6] Setting up swap space..."
-if [ ! -f /swapfile ]; then
-    echo "Creating 128GB swap file..."
-    sudo fallocate -l 128G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1G count=128 2>/dev/null
+# Check if swapfile exists but is not active
+if [ -f /swapfile ]; then
+    if ! swapon --show | grep -q "/swapfile"; then
+        echo "Activating existing swapfile..."
+        sudo mkswap /swapfile 2>/dev/null || true
+        sudo swapon /swapfile 2>/dev/null || true
+    fi
+elif [ ! -f /swapfile ]; then
+    echo "Creating 64GB swap file..."
+    sudo fallocate -l 64G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1G count=64 status=progress 2>/dev/null
     sudo chmod 600 /swapfile
-    sudo mkswap /swapfile 2>/dev/null || true
-    sudo swapon /swapfile 2>/dev/null || true
-    echo "Swap enabled: $(free -h | grep Swap)"
+    sudo mkswap /swapfile
+    sudo swapon /swapfile
 fi
+echo "Swap status: $(swapon --show 2>/dev/null || echo 'none')"
+echo "Memory: $(free -h | grep -E 'Mem|Swap')"
 
 # Step 6: Start training
 echo "[6/6] Starting BF16 LoRA training with DeepSpeed ZeRO-3..."
