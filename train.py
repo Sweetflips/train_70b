@@ -3,9 +3,9 @@
 import torch
 import sys
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TrainingArguments
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from trl import SFTTrainer, SFTConfig
+from trl import SFTTrainer
 
 def main():
     # Models - 32B is the largest available
@@ -64,26 +64,23 @@ def main():
 
     dataset = dataset.map(fmt, remove_columns=dataset.column_names)
 
-    # SFTConfig includes all training args + SFT-specific args (trl >= 0.13)
-    sft_config = SFTConfig(
+    # Use TrainingArguments with DeepSpeed ZeRO-3 for memory efficiency
+    training_args = TrainingArguments(
         output_dir="./output",
         num_train_epochs=1,
-        per_device_train_batch_size=1,  # Very conservative
-        gradient_accumulation_steps=128,  # Very high accumulation
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=128,
         learning_rate=1e-4,
         warmup_ratio=0.03,
         bf16=True,
-        logging_steps=1,  # Log more frequently
-        save_steps=100,  # Save more frequently
-        optim="adamw_torch",  # Use regular AdamW instead of paged
+        logging_steps=10,
+        save_steps=500,
+        optim="adamw_torch",
         gradient_checkpointing=True,
         report_to="none",
-        # SFT-specific args
-        max_seq_length=512,  # Very short sequences to save memory
-        dataset_text_field="text",
-        packing=False,
-        dataloader_num_workers=0,  # Disable multiprocessing in dataloader
+        dataloader_num_workers=0,
         dataloader_pin_memory=False,
+        deepspeed="ds_config.json",  # DeepSpeed ZeRO-3 config
     )
 
     print("Initializing trainer...")
@@ -91,7 +88,10 @@ def main():
         model=model,
         train_dataset=dataset,
         processing_class=tokenizer,
-        args=sft_config,
+        args=training_args,
+        max_seq_length=2048,  # SFT-specific args
+        dataset_text_field="text",
+        packing=False,
     )
 
     print("Starting training...")

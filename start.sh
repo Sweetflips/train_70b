@@ -22,7 +22,7 @@ elif [ -d "venv" ]; then
     source venv/bin/activate
 fi
 # Upgrade trl to latest (0.13+) for new SFTConfig API
-pip install -q --upgrade torch transformers datasets accelerate peft bitsandbytes huggingface_hub 2>/dev/null || true
+pip install -q --upgrade torch transformers datasets accelerate peft bitsandbytes huggingface_hub deepspeed 2>/dev/null || true
 pip install -q --upgrade "trl>=0.13.0" 2>/dev/null || true
 
 # Step 2: Download models
@@ -135,11 +135,12 @@ echo "Dataset: $(wc -l < $DATASET) examples"
 
 # Step 4: Start training
 echo "[4/4] Starting QLoRA training..."
-# Use regular DDP multi-GPU training (simpler than DeepSpeed for B200 GPUs)
+# Use DeepSpeed ZeRO-3 to shard model across 8 GPUs (prevents OOM)
 accelerate launch \
     --multi_gpu \
     --num_processes 8 \
     --mixed_precision bf16 \
+    --deepspeed_config_file ds_config.json \
     train.py $MODEL_SIZE
 
 echo "============================================"
