@@ -94,12 +94,37 @@ import time
 start = time.time()
 count = 0
 with open("curated_1m_dataset.jsonl", "w") as f:
-    for ds in [ds1, ds2]:
-        for ex in ds:
-            f.write(json.dumps(ex) + "\n")
-            count += 1
-            if count % 100000 == 0:
-                print(f"  Written {count:,} examples...")
+    # Process OpenCodeInstruct
+    for ex in ds1:
+        # Standardize to messages format
+        msg = [
+            {"role": "user", "content": ex.get("input", ex.get("instruction", ""))},
+            {"role": "assistant", "content": ex.get("output", ex.get("response", ""))}
+        ]
+        f.write(json.dumps({"messages": msg}) + "\n")
+        count += 1
+        if count % 100000 == 0: print(f"  Written {count:,} examples...")
+
+    # Process Glaive
+    for ex in ds2:
+        # Glaive uses 'system' and 'chat' columns
+        msg = []
+        if ex.get("system"):
+            msg.append({"role": "system", "content": ex["system"]})
+        
+        # Convert Glaive chat string to messages if it's a string, or use as is if list
+        chat = ex.get("chat", "")
+        if isinstance(chat, str):
+            # Very basic parser for Glaive's USER/ASSISTANT format if needed
+            # but usually it's better to just wrap the whole thing if complex
+            msg.append({"role": "user", "content": chat})
+        else:
+            msg.extend(chat)
+            
+        f.write(json.dumps({"messages": msg}) + "\n")
+        count += 1
+        if count % 100000 == 0: print(f"  Written {count:,} examples...")
+
 print(f"Done! {count:,} examples in {time.time()-start:.1f}s")
 EOF
 fi

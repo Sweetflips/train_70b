@@ -39,9 +39,8 @@ model.print_trainable_parameters()
 dataset = load_dataset("json", data_files=DATA, split="train")
 
 def fmt(ex):
-    if "messages" in ex: return {"text": tokenizer.apply_chat_template(ex["messages"], tokenize=False)}
-    if "conversations" in ex: return {"text": tokenizer.apply_chat_template([{"role": c.get("role","user" if c.get("from")=="human" else "assistant"), "content": c.get("content",c.get("value",""))} for c in ex["conversations"]], tokenize=False)}
-    return {"text": tokenizer.apply_chat_template([{"role":"user","content":ex.get("instruction","")},{"role":"assistant","content":ex.get("output",ex.get("response",""))}], tokenize=False)}
+    # Data is now standardized to "messages" format in start.sh
+    return {"text": tokenizer.apply_chat_template(ex["messages"], tokenize=False)}
 
 dataset = dataset.map(fmt, remove_columns=dataset.column_names)
 
