@@ -145,16 +145,21 @@ if [ ! -f /swapfile ]; then
 fi
 
 # Step 5: Start training
-echo "[5/5] Starting QLoRA training..."
-# Set memory allocator config to reduce fragmentation
+echo "[5/5] Starting QLoRA training with DeepSpeed ZeRO-3..."
+
+# Increase system limits for 8-way distributed training
+ulimit -n 65535 2>/dev/null || true
+export MAX_JOBS=8
 export MALLOC_CONF="dirty_decay_ms:1000,muzzy_decay_ms:1000"
 
 # Use DeepSpeed ZeRO-3 to shard model across 8 GPUs (prevents OOM)
+# DeepSpeed handles model partitioning, preventing 8x CPU RAM usage
 accelerate launch \
     --multi_gpu \
     --num_processes 8 \
-    --mixed_precision bf16 \
+    --use_deepspeed \
     --deepspeed_config_file ds_config.json \
+    --mixed_precision bf16 \
     train.py $MODEL_SIZE
 
 echo "============================================"
