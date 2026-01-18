@@ -81,21 +81,17 @@ if token:
 
 print("Downloading datasets from HuggingFace...")
 
-# nvidia/OpenCodeInstruct - verified exists
-print("1/3 OpenCodeInstruct (500K)...")
-ds1 = load_dataset("nvidia/OpenCodeInstruct", split="train[:500000]", token=token)
-
-# bangnbx/cursor_tools_50k - verified exists  
-print("2/3 Cursor Tools (50K)...")
-ds2 = load_dataset("bangnbx/cursor_tools_50k", split="train", token=token)
+# nvidia/OpenCodeInstruct - large coding dataset
+print("1/2 OpenCodeInstruct (800K)...")
+ds1 = load_dataset("nvidia/OpenCodeInstruct", split="train[:800000]", token=token)
 
 # glaiveai/glaive-function-calling-v2 - tool calling dataset
-print("3/3 Glaive Function Calling (450K)...")
-ds3 = load_dataset("glaiveai/glaive-function-calling-v2", split="train[:450000]", token=token)
+print("2/2 Glaive Function Calling (200K)...")
+ds2 = load_dataset("glaiveai/glaive-function-calling-v2", split="train[:200000]", token=token)
 
 print("Writing curated_1m_dataset.jsonl...")
 with open("curated_1m_dataset.jsonl", "w") as f:
-    for ds in [ds1, ds2, ds3]:
+    for ds in [ds1, ds2]:
         for ex in ds:
             f.write(json.dumps(ex) + "\n")
 
