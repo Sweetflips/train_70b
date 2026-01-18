@@ -20,7 +20,9 @@ if [ -z "$RUNPOD_POD_ID" ] && [ ! -d "venv" ]; then
 elif [ -d "venv" ]; then
     source venv/bin/activate
 fi
-pip install -q torch transformers datasets accelerate peft trl bitsandbytes huggingface_hub 2>/dev/null || true
+# Upgrade trl to latest (0.13+) for new SFTConfig API
+pip install -q --upgrade torch transformers datasets accelerate peft bitsandbytes huggingface_hub 2>/dev/null || true
+pip install -q --upgrade "trl>=0.13.0" 2>/dev/null || true
 
 # Step 2: Download models
 echo "[2/4] Downloading Qwen models from HuggingFace..."

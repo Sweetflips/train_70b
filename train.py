@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""70B QLoRA - Production training script for 2x B200."""
+"""QLoRA Training - Production script for 8x B200."""
 import torch
 import sys
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TrainingArguments
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from trl import SFTTrainer
+from trl import SFTTrainer, SFTConfig
 
 # Models - 32B is the largest available
 MODELS = {
@@ -25,15 +25,28 @@ print(f"Training: {MODEL}")
 tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
 tokenizer.pad_token = tokenizer.eos_token
 
+# Use dtype instead of torch_dtype (deprecated)
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16,
+    bnb_4bit_use_double_quant=True
+)
+
 model = AutoModelForCausalLM.from_pretrained(
-    MODEL, 
-    quantization_config=BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True),
-    device_map="auto", 
+    MODEL,
+    quantization_config=bnb_config,
+    device_map="auto",
     trust_remote_code=True,
-    torch_dtype=torch.bfloat16
+    dtype=torch.bfloat16  # Updated from torch_dtype
 )
 model = prepare_model_for_kbit_training(model)
-model = get_peft_model(model, LoraConfig(r=64, lora_alpha=128, target_modules=["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"], task_type="CAUSAL_LM"))
+model = get_peft_model(model, LoraConfig(
+    r=64,
+    lora_alpha=128,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+    task_type="CAUSAL_LM"
+))
 model.print_trainable_parameters()
 
 dataset = load_dataset("json", data_files=DATA, split="train")
@@ -44,27 +57,31 @@ def fmt(ex):
 
 dataset = dataset.map(fmt, remove_columns=dataset.column_names)
 
+# SFTConfig includes all training args + SFT-specific args (trl >= 0.13)
+sft_config = SFTConfig(
+    output_dir="./output",
+    num_train_epochs=1,
+    per_device_train_batch_size=2,  # B200 180GB can handle batch=2
+    gradient_accumulation_steps=16,
+    learning_rate=1e-4,
+    warmup_ratio=0.03,
+    bf16=True,
+    logging_steps=10,
+    save_steps=500,
+    optim="paged_adamw_8bit",
+    gradient_checkpointing=True,
+    report_to="none",
+    # SFT-specific args
+    max_seq_length=4096,
+    dataset_text_field="text",
+    packing=True,
+)
+
 trainer = SFTTrainer(
     model=model,
     train_dataset=dataset,
     processing_class=tokenizer,
-    args=TrainingArguments(
-        output_dir="./output",
-        num_train_epochs=1,
-        per_device_train_batch_size=2,  # B200 180GB can handle batch=2
-        gradient_accumulation_steps=16,
-        learning_rate=1e-4,
-        warmup_ratio=0.03,
-        bf16=True,
-        logging_steps=10,
-        save_steps=500,
-        optim="paged_adamw_8bit",
-        gradient_checkpointing=True,
-        report_to="none",
-    ),
-    max_seq_length=4096,
-    dataset_text_field="text",
-    packing=True,
+    args=sft_config,
 )
 
 trainer.train()
