@@ -3,7 +3,7 @@
 # Usage: ./start.sh [14b|32b|72b]
 set -e
 
-MODEL_SIZE=${1:-72b}
+MODEL_SIZE=${1:-14b}
 # Use 8 GPUs for B200 setup (override auto-detection)
 NUM_GPUS=8
 # Export MODEL_SIZE for use in Python scripts
@@ -66,12 +66,11 @@ model_size = "$MODEL_SIZE"
 models = {
     "14b": "Qwen/Qwen2.5-Coder-14B-Instruct",
     "32b": "Qwen/Qwen2.5-Coder-32B-Instruct",
-    "72b": "Qwen/Qwen2.5-72B-Instruct",
 }
 
 if model_size not in models:
-    print(f"Unknown model size {model_size}, defaulting to 72b")
-    model_size = "72b"
+    print(f"Unknown model size {model_size}, defaulting to 14b")
+    model_size = "14b"
 
 model = models[model_size]
 print(f"Downloading {model}...")
@@ -153,13 +152,12 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 
 # Determine model based on MODEL_SIZE
-model_size = os.getenv("MODEL_SIZE", "72b")
+model_size = os.getenv("MODEL_SIZE", "14b")
 models = {
-    "72b": "Qwen/Qwen2.5-72B-Instruct",
-    "32b": "Qwen/Qwen2.5-Coder-32B-Instruct",
     "14b": "Qwen/Qwen2.5-Coder-14B-Instruct",
+    "32b": "Qwen/Qwen2.5-Coder-32B-Instruct",
 }
-model_id = models.get(model_size, models["72b"])
+model_id = models.get(model_size, models["14b"])
 
 print(f"Loading tokenizer for {model_id}...")
 tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)

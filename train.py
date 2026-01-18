@@ -25,15 +25,14 @@ def train():
     gc.collect()
     torch.cuda.empty_cache()
     
-    # Models - includes 72B (Qwen2.5-72B-Instruct, not Coder variant)
+    # Model selection - 14B first, then 32B later
     MODELS = {
-        "72b": "Qwen/Qwen2.5-72B-Instruct",
-        "32b": "Qwen/Qwen2.5-Coder-32B-Instruct",
         "14b": "Qwen/Qwen2.5-Coder-14B-Instruct",
+        "32b": "Qwen/Qwen2.5-Coder-32B-Instruct",
     }
     
-    model_arg = sys.argv[1] if len(sys.argv) > 1 else "72b"
-    MODEL = MODELS.get(model_arg, MODELS["72b"])
+    model_arg = sys.argv[1] if len(sys.argv) > 1 else "14b"
+    MODEL = MODELS.get(model_arg, MODELS["14b"])
     
     print(f"[Rank {local_rank}/{world_size}] Training: {MODEL}", flush=True)
 
