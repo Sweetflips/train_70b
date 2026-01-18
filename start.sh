@@ -222,6 +222,9 @@ export MALLOC_CONF="dirty_decay_ms:1000,muzzy_decay_ms:1000"
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 
+# Prevent HuggingFace from over-threading
+export HF_DATASETS_NUM_PROC=1
+
 # Force HuggingFace to use memory-mapped cache
 export HF_DATASETS_OFFLINE=0
 export HF_DATASETS_COPY_FROM_CACHE=0
@@ -231,6 +234,7 @@ export HF_DATASETS_COPY_FROM_CACHE=0
 accelerate launch \
     --num_processes 8 \
     --num_machines 1 \
+    --machine_rank 0 \
     --use_deepspeed \
     --deepspeed_config_file ds_config.json \
     --mixed_precision bf16 \

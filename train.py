@@ -6,8 +6,8 @@ import os
 import deepspeed
 from accelerate import Accelerator
 from datasets import load_from_disk
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TrainingArguments
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
+from peft import LoraConfig, get_peft_model
 from trl import SFTTrainer
 
 def main():
@@ -33,28 +33,29 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
 
-    print("Loading model with DeepSpeed ZeRO-3 initialization...")
-    # Use dtype instead of torch_dtype (deprecated)
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True
-    )
+    print("Loading model with sequential loading (prevents 8x RAM spike)...")
+    # THE FIX: Sequential Loading - Each process waits for the previous one
+    # Instead of 8 processes loading 64GB each (512GB total), only one loads at a time (64GB)
+    import time
+    for i in range(accelerator.num_processes):
+        if accelerator.local_process_index == i:
+            print(f"Process {i}/{accelerator.num_processes} is loading the model...")
+            # Use BF16 LoRA instead of 4-bit QLoRA (B200s have enough VRAM)
+            # This avoids bitsandbytes CPU overhead that triggers std::bad_alloc
+            with deepspeed.zero.Init():
+                model = AutoModelForCausalLM.from_pretrained(
+                    MODEL,
+                    trust_remote_code=True,
+                    dtype=torch.bfloat16,  # BF16, not 4-bit
+                    low_cpu_mem_usage=True,  # Critical: prevents RAM spike
+                    device_map=None,  # DeepSpeed handles placement
+                )
+            print(f"Process {i} finished loading model")
+        # Wait for this process to finish before the next one starts
+        accelerator.wait_for_everyone()
 
-    # deepspeed.zero.Init() ensures model is sharded during loading
-    # Each process only allocates 1/8th of the model (prevents 8x RAM spike)
-    with deepspeed.zero.Init():
-        model = AutoModelForCausalLM.from_pretrained(
-            MODEL,
-            quantization_config=bnb_config,
-            trust_remote_code=True,
-            dtype=torch.bfloat16,
-            low_cpu_mem_usage=True,  # Critical: prevents RAM spike during loading
-        )
-
-    print("Preparing model for training...")
-    model = prepare_model_for_kbit_training(model)
+    print("Preparing model for LoRA training...")
+    # Apply LoRA (not QLoRA - no quantization needed on B200s)
     model = get_peft_model(model, LoraConfig(
         r=64,
         lora_alpha=128,
@@ -63,11 +64,11 @@ def main():
     ))
     model.print_trainable_parameters()
 
-    print("Loading pre-tokenized dataset from disk...")
+    print("Loading pre-tokenized dataset from disk (memory-mapped)...")
     # Load pre-tokenized data (saved in start.sh step 4)
-    # This prevents 8 processes from tokenizing 1M rows simultaneously
+    # keep_in_memory=False ensures dataset stays on disk (doesn't enter CPU RAM)
     try:
-        dataset = load_from_disk("./tokenized_data")
+        dataset = load_from_disk("./tokenized_data", keep_in_memory=False)
         print("Pre-tokenized dataset loaded successfully!")
     except Exception as e:
         print(f"Warning: Could not load pre-tokenized dataset: {e}")
