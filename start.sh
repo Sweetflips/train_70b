@@ -90,12 +90,17 @@ print("2/2 Glaive Function Calling (200K)...")
 ds2 = load_dataset("glaiveai/glaive-function-calling-v2", split="train[:200000]", token=token)
 
 print("Writing curated_1m_dataset.jsonl...")
+import time
+start = time.time()
+count = 0
 with open("curated_1m_dataset.jsonl", "w") as f:
     for ds in [ds1, ds2]:
         for ex in ds:
             f.write(json.dumps(ex) + "\n")
-
-print("Done!")
+            count += 1
+            if count % 100000 == 0:
+                print(f"  Written {count:,} examples...")
+print(f"Done! {count:,} examples in {time.time()-start:.1f}s")
 EOF
 fi
 echo "Dataset: $(wc -l < $DATASET) examples"
