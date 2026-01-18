@@ -222,6 +222,14 @@ fi
 # Step 6: Start training
 echo "[6/6] Starting BF16 LoRA training with DeepSpeed ZeRO-2..."
 
+# Kill any zombie processes first
+pkill -9 python 2>/dev/null || true
+sleep 2
+
+# Set strict memory limits
+export MALLOC_CONF="dirty_decay_ms:0,muzzy_decay_ms:0"
+export OMP_NUM_THREADS=1
+
 # Increase system limits for 8-way distributed training
 ulimit -n 65535 2>/dev/null || true
 export MAX_JOBS=8
@@ -229,15 +237,10 @@ export MAX_JOBS=8
 # Prevent HuggingFace from over-threading
 export HF_DATASETS_NUM_PROC=1
 
-# Use DeepSpeed ZeRO-2 (faster than ZeRO-3 for 32B on B200s)
-# Meta-device loading ensures zero CPU RAM usage during model initialization
-accelerate launch \
-    --num_processes 8 \
-    --num_machines 1 \
-    --mixed_precision bf16 \
-    --use_deepspeed \
-    --deepspeed_config_file ds_config.json \
-    train.py $MODEL_SIZE
+# Use fixed config file to bypass accelerate's system scanning (prevents RAM spike)
+# Sequential loading ensures only one process loads model at a time (64GB vs 512GB)
+echo "Starting Training on 8x B200..."
+accelerate launch --config_file accelerate_config.yaml train.py $MODEL_SIZE
 
 echo "============================================"
 echo "Training Complete!"

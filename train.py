@@ -6,10 +6,9 @@ import os
 import deepspeed
 from accelerate import Accelerator
 from datasets import load_from_disk
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, TrainingArguments
-from accelerate import init_empty_weights
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import LoraConfig, get_peft_model
-from trl import SFTTrainer
+from trl import SFTConfig, SFTTrainer
 
 def main():
     # Models - 32B is the largest available
@@ -34,22 +33,21 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
 
-    print("Loading model with meta-device (zero CPU RAM usage)...")
-    # THE FIX: Meta-device loading - Model weights never touch CPU RAM
-    # 1. Load config only (uses 0 RAM)
-    config = AutoConfig.from_pretrained(MODEL, trust_remote_code=True)
-    
-    # 2. Initialize model on "meta" device (uses 0 RAM)
-    # DeepSpeed will load weights directly to VRAM during training initialization
-    with init_empty_weights():
-        model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.bfloat16, trust_remote_code=True)
-    
-    print("Model structure initialized on meta device (0 CPU RAM used)")
-    
-    # DeepSpeed will load weights directly to GPUs during trainer initialization
-    # We need to provide the model path for DeepSpeed to load weights
-    # Store it as an attribute so DeepSpeed can access it
-    model.config._name_or_path = MODEL
+    print("Loading model with sequential loading (prevents 8x RAM spike)...")
+    # THE FIX: Sequential Loading - Only one process loads at a time
+    # Instead of 8 processes loading 64GB each (512GB total), only one loads at a time (64GB)
+    for i in range(accelerator.num_processes):
+        if accelerator.local_process_index == i:
+            print(f"Process {i}/{accelerator.num_processes} is loading the model...")
+            model = AutoModelForCausalLM.from_pretrained(
+                MODEL,
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,  # Critical: prevents RAM spike
+            )
+            print(f"Process {i} finished loading model")
+        # Wait for this process to finish before the next one starts
+        accelerator.wait_for_everyone()
     
     print("Preparing model for LoRA training...")
     # Apply LoRA (not QLoRA - no quantization needed on B200s)
@@ -63,33 +61,23 @@ def main():
 
     print("Loading pre-tokenized dataset from disk (memory-mapped)...")
     # Load pre-tokenized data (saved in start.sh step 4)
-    # keep_in_memory=False ensures dataset stays on disk (doesn't enter CPU RAM)
-    try:
-        dataset = load_from_disk("./tokenized_data", keep_in_memory=False)
-        print("Pre-tokenized dataset loaded successfully!")
-    except Exception as e:
-        print(f"Warning: Could not load pre-tokenized dataset: {e}")
-        print("Falling back to on-the-fly tokenization (may use more RAM)...")
-        from datasets import load_dataset
-        dataset = load_dataset("json", data_files=DATA, split="train", streaming=False)
-        
-        def fmt(ex):
-            return {"text": tokenizer.apply_chat_template(ex["messages"], tokenize=False)}
-        
-        dataset = dataset.map(
-            fmt,
-            remove_columns=dataset.column_names,
-            batched=True,
-            batch_size=1000,
-            desc="Formatting dataset"
-        )
+    # Memory-mapped loading - dataset stays on disk (0 RAM usage)
+    dataset = load_from_disk("./tokenized_data", keep_in_memory=False)
+    print("Pre-tokenized dataset loaded successfully!")
 
-    # Use TrainingArguments with DeepSpeed ZeRO-2 for memory efficiency
-    training_args = TrainingArguments(
+    # Use SFTConfig with RAM-safe settings
+    # CRITICAL: dataset_text_field=None because data is already tokenized
+    # CRITICAL: packing=False prevents 1M row reorganization RAM spike
+    # CRITICAL: dataset_num_proc=None prevents multi-process dataset overhead
+    sft_config = SFTConfig(
         output_dir="./output",
         num_train_epochs=1,
-        per_device_train_batch_size=2,  # ZeRO-2 can handle batch_size=2
-        gradient_accumulation_steps=64,  # Reduced since batch_size increased
+        max_seq_length=2048,
+        dataset_text_field=None,  # CRITICAL: Data is pre-tokenized, don't process
+        packing=False,  # CRITICAL: Packing 1M rows will crash CPU RAM
+        dataset_num_proc=None,  # CRITICAL: Prevents multi-process dataset overhead
+        per_device_train_batch_size=2,
+        gradient_accumulation_steps=4,
         learning_rate=1e-4,
         warmup_ratio=0.03,
         bf16=True,
@@ -100,19 +88,15 @@ def main():
         report_to="none",
         dataloader_num_workers=0,  # Critical: keep data loading on main thread
         dataloader_pin_memory=False,  # Saves RAM
-        group_by_length=True,  # Helps with VRAM efficiency
         deepspeed="ds_config.json",  # DeepSpeed ZeRO-2 config
     )
 
     print("Initializing trainer...")
+    # No processing_class needed - data is already tokenized
     trainer = SFTTrainer(
         model=model,
+        args=sft_config,
         train_dataset=dataset,
-        processing_class=tokenizer,
-        args=training_args,
-        max_seq_length=2048,  # SFT-specific args
-        dataset_text_field="text",
-        packing=False,
     )
 
     print("Starting training...")
