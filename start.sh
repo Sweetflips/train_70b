@@ -233,29 +233,47 @@ echo "[6/6] Starting BF16 LoRA training with DeepSpeed ZeRO-3..."
 
 # Kill any zombie processes first
 pkill -9 python 2>/dev/null || true
-sleep 2
+pkill -9 pt_main_thread 2>/dev/null || true
+sleep 3
 
-# Force the OS to reclaim memory (nuclear option)
-sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+# Clear GPU memory
+python3 -c "import torch; [torch.cuda.empty_cache() for _ in range(torch.cuda.device_count())]" 2>/dev/null || true
 
 # Strict memory allocation settings
-export MALLOC_CONF="dirty_decay_ms:0,muzzy_decay_ms:0"
+export MALLOC_CONF="dirty_decay_ms:0,muzzy_decay_ms:0,background_thread:false"
+export MALLOC_MMAP_THRESHOLD_=131072
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export TOKENIZERS_PARALLELISM=false
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+
+# NCCL settings for stability
+export NCCL_DEBUG=WARN
+export NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_IB_DISABLE=0
+export NCCL_P2P_LEVEL=NVL
 
 # Increase system limits for 8-way distributed training
 ulimit -n 65535 2>/dev/null || true
-export MAX_JOBS=8
+ulimit -s unlimited 2>/dev/null || true
 
 # Prevent HuggingFace from over-threading
 export HF_DATASETS_NUM_PROC=1
 
-# Use fixed config file to bypass accelerate's system scanning (prevents RAM spike)
-# Sequential loading ensures only one process loads model at a time (64GB vs 512GB)
-# Dataset loading inside train() function prevents multiprocessing memory duplication
-echo "Starting Training on 8x B200..."
-accelerate launch --config_file accelerate_config.yaml train.py $MODEL_SIZE
+# Show memory before launch
+echo "=== Memory before training ==="
+free -h
+nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv
+echo "=============================="
+
+# Use torchrun directly (less overhead than accelerate)
+echo "Starting Training on ${NUM_GPUS}x B200 with torchrun..."
+torchrun \
+    --nproc_per_node=$NUM_GPUS \
+    --master_port=29500 \
+    --nnodes=1 \
+    --node_rank=0 \
+    train.py $MODEL_SIZE
 
 echo "============================================"
 echo "Training Complete!"
