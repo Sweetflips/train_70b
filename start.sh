@@ -6,6 +6,8 @@ set -e
 MODEL_SIZE=${1:-72b}
 # Use 8 GPUs for B200 setup (override auto-detection)
 NUM_GPUS=8
+# Export MODEL_SIZE for use in Python scripts
+export MODEL_SIZE
 
 echo "============================================"
 echo "Sweetflips Training Pipeline"
@@ -208,9 +210,6 @@ export MKL_NUM_THREADS=1
 # Force HuggingFace to use memory-mapped cache
 export HF_DATASETS_OFFLINE=0
 export HF_DATASETS_COPY_FROM_CACHE=0
-
-# Export MODEL_SIZE for train.py
-export MODEL_SIZE=$MODEL_SIZE
 
 # Use DeepSpeed ZeRO-3 to shard model across 8 GPUs (prevents OOM)
 # DeepSpeed handles model partitioning, preventing 8x CPU RAM usage
