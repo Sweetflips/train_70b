@@ -3,9 +3,9 @@
 import torch
 import sys
 from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, TrainingArguments
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from trl import SFTTrainer, SFTConfig
+from trl import SFTTrainer
 
 # Models - 32B is the largest available
 MODELS = {
@@ -48,7 +48,7 @@ trainer = SFTTrainer(
     model=model,
     train_dataset=dataset,
     processing_class=tokenizer,
-    args=SFTConfig(
+    args=TrainingArguments(
         output_dir="./output",
         num_train_epochs=1,
         per_device_train_batch_size=2,  # B200 180GB can handle batch=2
@@ -61,10 +61,10 @@ trainer = SFTTrainer(
         optim="paged_adamw_8bit",
         gradient_checkpointing=True,
         report_to="none",
-        max_seq_length=4096,
-        dataset_text_field="text",
-        packing=True,
     ),
+    max_seq_length=4096,
+    dataset_text_field="text",
+    packing=True,
 )
 
 trainer.train()
