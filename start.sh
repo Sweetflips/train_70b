@@ -35,8 +35,9 @@ else
     export HUGGING_FACE_HUB_TOKEN=$HF_TOKEN
 fi
 
-python3 << 'EOF'
+python3 << EOF
 import os
+import sys
 from huggingface_hub import snapshot_download, login
 
 # Check for token in environment (supports both variable names)
@@ -47,18 +48,21 @@ if token:
 else:
     print("No token provided - proceeding without authentication")
 
-models = [
-    "Qwen/Qwen2.5-Coder-14B-Instruct",
-    "Qwen/Qwen2.5-Coder-32B-Instruct",
-    "Qwen/Qwen2.5-Coder-72B-Instruct",
-]
+# Only download the model we're training
+model_size = "$MODEL_SIZE"
+models = {
+    "14b": "Qwen/Qwen2.5-Coder-14B-Instruct",
+    "32b": "Qwen/Qwen2.5-Coder-32B-Instruct",
+}
 
-for m in models:
-    print(f"Downloading {m}...")
-    snapshot_download(repo_id=m, token=token)
-    print(f"Done: {m}")
+if model_size not in models:
+    print(f"Skipping model download for {model_size} - using base models only")
+    sys.exit(0)
 
-print("All models cached!")
+model = models[model_size]
+print(f"Downloading {model}...")
+snapshot_download(repo_id=model, token=token)
+print(f"Done: {model}")
 EOF
 
 # Step 3: Download dataset

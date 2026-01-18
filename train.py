@@ -7,14 +7,18 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTTrainer
 
-# Models from 1.md spec
+# Models - 32B is the largest available
 MODELS = {
-    "72b": "Qwen/Qwen2.5-Coder-72B-Instruct",
     "32b": "Qwen/Qwen2.5-Coder-32B-Instruct",
     "14b": "Qwen/Qwen2.5-Coder-14B-Instruct",
 }
 
-MODEL = MODELS.get(sys.argv[1] if len(sys.argv) > 1 else "72b", MODELS["72b"])
+model_arg = sys.argv[1] if len(sys.argv) > 1 else "32b"
+# Default to 32b if 72b requested (72B doesn't exist)
+if model_arg == "72b":
+    print("Note: 72B model not available, using 32B instead")
+    model_arg = "32b"
+MODEL = MODELS.get(model_arg, MODELS["32b"])
 DATA = "./curated_1m_dataset.jsonl"
 print(f"Training: {MODEL}")
 
