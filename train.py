@@ -64,32 +64,55 @@ def main():
     
     log(local_rank, f"MODEL: {MODEL}")
 
-    # Import heavy libraries with logging
+    # Import torch first (needed for distributed sync)
     log(local_rank, "IMPORT: torch...")
     import torch
     log(local_rank, f"IMPORT: torch OK (version={torch.__version__}, cuda={torch.cuda.is_available()})")
     
-    log(local_rank, "IMPORT: deepspeed...")
-    import deepspeed
-    log(local_rank, f"IMPORT: deepspeed OK (version={deepspeed.__version__})")
+    # Initialize torch.distributed BEFORE importing DeepSpeed
+    # This allows us to serialize heavy imports
+    log(local_rank, "DISTRIBUTED: initializing torch.distributed...")
+    if not torch.distributed.is_initialized():
+        torch.distributed.init_process_group(backend="nccl")
+    log(local_rank, f"DISTRIBUTED: initialized (rank={torch.distributed.get_rank()}, world={torch.distributed.get_world_size()})")
     
-    log(local_rank, "IMPORT: transformers...")
-    from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
-    log(local_rank, "IMPORT: transformers OK")
+    # CRITICAL: Serialize DeepSpeed import to prevent 8x simultaneous allocation
+    # Each rank imports one at a time with a barrier between
+    log(local_rank, "IMPORT: serializing heavy imports across ranks...")
+    for importing_rank in range(world_size):
+        if local_rank == importing_rank:
+            log(local_rank, "IMPORT: deepspeed (my turn)...")
+            import deepspeed
+            log(local_rank, f"IMPORT: deepspeed OK (version={deepspeed.__version__})")
+            
+            log(local_rank, "IMPORT: transformers...")
+            from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+            log(local_rank, "IMPORT: transformers OK")
+            
+            log(local_rank, "IMPORT: peft...")
+            from peft import LoraConfig, get_peft_model
+            log(local_rank, "IMPORT: peft OK")
+            
+            log(local_rank, "IMPORT: trl...")
+            from trl import SFTConfig, SFTTrainer
+            log(local_rank, "IMPORT: trl OK")
+            
+            log(local_rank, "IMPORT: datasets...")
+            from datasets import load_from_disk
+            log(local_rank, "IMPORT: datasets OK")
+            
+            log_memory(local_rank, "POST-IMPORT")
+            
+            # Force garbage collection after heavy imports
+            gc.collect()
+            torch.cuda.empty_cache()
+        
+        # All ranks wait for the importing rank to finish
+        torch.distributed.barrier()
+        log(local_rank, f"IMPORT: barrier passed for rank {importing_rank}")
     
-    log(local_rank, "IMPORT: peft...")
-    from peft import LoraConfig, get_peft_model
-    log(local_rank, "IMPORT: peft OK")
-    
-    log(local_rank, "IMPORT: trl...")
-    from trl import SFTConfig, SFTTrainer
-    log(local_rank, "IMPORT: trl OK")
-    
-    log(local_rank, "IMPORT: datasets...")
-    from datasets import load_from_disk
-    log(local_rank, "IMPORT: datasets OK")
-    
-    log_memory(local_rank, "POST-IMPORT")
+    log(local_rank, "IMPORT: all ranks have imported libraries")
+    log_memory(local_rank, "POST-ALL-IMPORTS")
 
     # Load tokenizer
     log(local_rank, "TOKENIZER: loading...")
@@ -110,18 +133,7 @@ def main():
     log(local_rank, "DEEPSPEED: loading ds_config.json...")
     with open("ds_config.json", "r") as f:
         ds_config = json.load(f)
-    log(local_rank, f"DEEPSPEED: config loaded: {json.dumps(ds_config, indent=2)}")
-
-    # Initialize distributed if not already done
-    log(local_rank, "DISTRIBUTED: checking init state...")
-    if not torch.distributed.is_initialized():
-        log(local_rank, "DISTRIBUTED: initializing process group...")
-        deepspeed.init_distributed()
-        log(local_rank, "DISTRIBUTED: initialized OK")
-    else:
-        log(local_rank, "DISTRIBUTED: already initialized")
-    
-    log_memory(local_rank, "POST-DISTRIBUTED")
+    log(local_rank, f"DEEPSPEED: config loaded")
     
     # Sync all ranks before model load
     log(local_rank, "BARRIER: waiting for all ranks before model load...")
