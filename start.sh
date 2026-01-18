@@ -158,21 +158,36 @@ tokenizer.pad_token = tokenizer.eos_token
 print("Loading dataset...")
 dataset = load_dataset("json", data_files="./curated_1m_dataset.jsonl", split="train")
 
-print("Tokenizing dataset (this may take a while)...")
-def tokenize_function(examples):
-    # Apply chat template and tokenize
+print("Tokenizing dataset (optimized for speed)...")
+# Optimized: Apply chat template first, then tokenize in larger batches
+def apply_template(examples):
     texts = []
     for msg_list in examples["messages"]:
         text = tokenizer.apply_chat_template(msg_list, tokenize=False)
         texts.append(text)
-    return tokenizer(texts, truncation=True, max_length=2048, padding=False)
+    return {"text": texts}
+
+# Step 1: Apply chat template (fast, can use many cores)
+print("Step 1/2: Applying chat templates...")
+dataset = dataset.map(
+    apply_template,
+    batched=True,
+    batch_size=10000,  # Large batches for template application
+    num_proc=os.cpu_count(),  # Use all CPU cores
+    remove_columns=dataset.column_names,
+    desc="Applying templates"
+)
+
+# Step 2: Tokenize (slower, but optimized)
+print("Step 2/2: Tokenizing texts...")
+def tokenize_texts(examples):
+    return tokenizer(examples["text"], truncation=True, max_length=2048, padding=False)
 
 tokenized_dataset = dataset.map(
-    tokenize_function,
+    tokenize_texts,
     batched=True,
-    batch_size=1000,
-    num_proc=min(os.cpu_count(), 8),  # Use CPU cores but limit to 8
-    remove_columns=dataset.column_names,
+    batch_size=5000,  # Larger batches for tokenization
+    num_proc=os.cpu_count(),  # Use all CPU cores
     desc="Tokenizing"
 )
 
