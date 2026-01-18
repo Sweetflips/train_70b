@@ -230,11 +230,13 @@ echo "Memory: $(free -h | grep -E 'Mem|Swap')"
 echo "[6/6] Starting BF16 LoRA training with DeepSpeed ZeRO-3..."
 
 # Kill any zombie processes first
+echo "Cleaning up zombie processes..."
 pkill -9 python 2>/dev/null || true
 pkill -9 pt_main_thread 2>/dev/null || true
 sleep 3
 
 # Clear GPU memory
+echo "Clearing GPU memory..."
 python3 -c "import torch; [torch.cuda.empty_cache() for _ in range(torch.cuda.device_count())]" 2>/dev/null || true
 
 # Environment settings
@@ -243,27 +245,106 @@ export MKL_NUM_THREADS=1
 export TOKENIZERS_PARALLELISM=false
 export HF_DATASETS_NUM_PROC=1
 
-# Use new env var name (PYTORCH_CUDA_ALLOC_CONF is deprecated)
+# PyTorch memory settings
 export PYTORCH_ALLOC_CONF="expandable_segments:True"
 
-# NCCL settings
+# NCCL settings - CRITICAL for preventing std::bad_alloc
 export NCCL_DEBUG=INFO
 export NCCL_ASYNC_ERROR_HANDLING=1
+# Limit NCCL buffer sizes to prevent massive initial allocation
+export NCCL_BUFFSIZE=2097152          # 2MB instead of default (can be much larger)
+export NCCL_NTHREADS=64               # Reduce thread count
+export NCCL_MAX_NCHANNELS=2           # Limit channels (default can be 32+)
+export NCCL_MIN_NCHANNELS=1
+# Use shared memory transport first (reduces memory pressure)
+export NCCL_SHM_DISABLE=0
+export NCCL_P2P_LEVEL=NVL             # Use NVLink if available
+# Reduce NCCL's graph memory
+export NCCL_GRAPH_MIXING_SUPPORT=0
+
+# CUDA settings
+export CUDA_DEVICE_MAX_CONNECTIONS=1  # Reduce connection overhead
 
 # System limits
 ulimit -n 65535 2>/dev/null || true
+ulimit -v unlimited 2>/dev/null || true
+ulimit -s unlimited 2>/dev/null || true
 
-# Show memory before launch
-echo "=== Memory before training ==="
+# Show memory and system info before launch
+echo "=== System Info Before Training ==="
+echo "Hostname: $(hostname)"
+echo "Kernel: $(uname -r)"
+echo "CPU cores: $(nproc)"
+echo "ulimit -v: $(ulimit -v)"
+echo "ulimit -s: $(ulimit -s)"
 free -h
-nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv
-echo "=============================="
+echo ""
+echo "GPU Memory:"
+nvidia-smi --query-gpu=index,name,memory.used,memory.free,memory.total --format=csv
+echo ""
+echo "NCCL Settings:"
+env | grep NCCL | sort
+echo "=================================="
 
-# Launch with accelerate (handles DeepSpeed init properly)
+# Test basic CUDA + NCCL functionality first
+echo "Testing CUDA initialization..."
+python3 -c "
+import os
+import sys
+print(f'Python: {sys.version}')
+
+import torch
+print(f'PyTorch: {torch.__version__}')
+print(f'CUDA available: {torch.cuda.is_available()}')
+print(f'CUDA version: {torch.version.cuda}')
+print(f'GPU count: {torch.cuda.device_count()}')
+
+for i in range(torch.cuda.device_count()):
+    props = torch.cuda.get_device_properties(i)
+    print(f'  GPU {i}: {props.name}, {props.total_memory // 1024**3}GB')
+
+# Test small allocation on each GPU
+print('Testing small tensor allocation on each GPU...')
+for i in range(torch.cuda.device_count()):
+    t = torch.zeros(1024, device=f'cuda:{i}')
+    del t
+    torch.cuda.empty_cache()
+print('CUDA test passed!')
+" || { echo "CUDA test FAILED!"; exit 1; }
+
+echo ""
+echo "Testing NCCL distributed initialization..."
+python3 -c "
+import os
+os.environ['MASTER_ADDR'] = '127.0.0.1'
+os.environ['MASTER_PORT'] = '29500'
+os.environ['RANK'] = '0'
+os.environ['WORLD_SIZE'] = '1'
+os.environ['LOCAL_RANK'] = '0'
+
+import torch
+import torch.distributed as dist
+
+# Init with NCCL backend (single process test)
+dist.init_process_group(backend='nccl', world_size=1, rank=0)
+print(f'NCCL init success! Backend: {dist.get_backend()}')
+dist.destroy_process_group()
+print('NCCL test passed!')
+" || { echo "NCCL single-process test FAILED!"; exit 1; }
+
+echo ""
+echo "Pre-flight tests passed. Starting distributed training..."
 echo "Starting Training on ${NUM_GPUS}x GPUs..."
-accelerate launch \
-    --config_file accelerate_config.yaml \
-    --num_processes $NUM_GPUS \
+echo ""
+
+# Launch with torchrun for better error messages
+# (accelerate launch sometimes swallows errors)
+torchrun \
+    --standalone \
+    --nnodes=1 \
+    --nproc_per_node=$NUM_GPUS \
+    --rdzv_backend=c10d \
+    --rdzv_endpoint=localhost:29500 \
     train.py $MODEL_SIZE
 
 echo "============================================"
