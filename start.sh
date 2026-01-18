@@ -247,14 +247,16 @@ export TOKENIZERS_PARALLELISM=false
 export HF_DATASETS_NUM_PROC=1
 
 # PyTorch memory settings - CRITICAL for preventing OOM
-export PYTORCH_ALLOC_CONF="expandable_segments:True,max_split_size_mb:512"
+# Unified configuration: expandable segments + conservative split size
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:256"
+# Note: PYTORCH_ALLOC_CONF is deprecated, use PYTORCH_CUDA_ALLOC_CONF instead
 
 # NCCL settings - CRITICAL for preventing std::bad_alloc
 export NCCL_DEBUG=INFO
 export NCCL_ASYNC_ERROR_HANDLING=1
 # Limit NCCL buffer sizes to prevent massive initial allocation
 export NCCL_BUFFSIZE=1048576          # 1MB instead of default (can be much larger)
-export NCCL_NTHREADS=32               # Reduce thread count
+export NCCL_NTHREADS=16               # Reduced thread count for memory efficiency
 export NCCL_MAX_NCHANNELS=1           # Single channel only
 export NCCL_MIN_NCHANNELS=1
 # Use shared memory transport first (reduces memory pressure)
@@ -268,8 +270,6 @@ export NCCL_SOCKET_IFNAME=lo          # Use localhost
 # CUDA settings - limit memory allocation
 export CUDA_DEVICE_MAX_CONNECTIONS=1  # Reduce connection overhead
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
-# Limit CUDA memory allocation per process (leave some for NCCL)
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF},max_split_size_mb:256"
 export CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=100
 export CUDA_MPS_PINNED_MEMORY_SIZE=0
 

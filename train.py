@@ -116,9 +116,11 @@ def main():
             
             log_memory(local_rank, "POST-IMPORT")
             
-            # Force garbage collection
+            # Aggressive garbage collection after imports
             gc.collect()
             torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize(device)
             
         finally:
             # Release lock
@@ -127,6 +129,9 @@ def main():
     
     # Small delay to let the next process grab the lock
     time.sleep(0.2)
+    
+    # Additional cleanup before distributed init
+    gc.collect()
     
     # Now all processes can initialize distributed together
     log(local_rank, "DISTRIBUTED: initializing...")
@@ -149,34 +154,45 @@ def main():
     tokenizer.pad_token = tokenizer.eos_token
     log(local_rank, "TOKENIZER: OK")
     
-    # Load dataset
+    # Load dataset - use streaming if available to reduce memory footprint
     log(local_rank, "DATASET: loading...")
     dataset = load_from_disk("./tokenized_data", keep_in_memory=False)
     log(local_rank, f"DATASET: {len(dataset)} examples")
     
+    # Cleanup after dataset load
+    gc.collect()
     log_memory(local_rank, "POST-DATASET")
     
     # Barrier before model load
     torch.distributed.barrier()
     
     # Load model - serialize with file lock to prevent disk/memory contention
+    # OPTIMIZED: Load to CPU, then let FSDP handle sharding and GPU placement
+    # This avoids loading full model to GPU before FSDP sharding (prevents OOM)
     log(local_rank, "MODEL: waiting for lock to load model...")
     with open(lock_file, 'w') as lock_fd:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        log(local_rank, "MODEL: loading...")
+        log(local_rank, "MODEL: loading to CPU (FSDP will handle GPU sharding)...")
         try:
+            # Load model to CPU - FSDP will shard and move to GPU efficiently
+            # Using device_map=None loads to CPU, avoiding GPU OOM before FSDP wraps
             model = AutoModelForCausalLM.from_pretrained(
                 MODEL,
                 torch_dtype=torch.bfloat16,
                 trust_remote_code=True,
                 low_cpu_mem_usage=True,
                 attn_implementation="flash_attention_2",
-                device_map={"": device},
+                device_map=None,  # Load to CPU - FSDP will handle GPU placement
             )
-            log(local_rank, "MODEL: loaded!")
-            log_memory(local_rank, "POST-MODEL")
+            log(local_rank, "MODEL: loaded to CPU!")
+            log_memory(local_rank, "POST-CPU-LOAD")
+
+            # Aggressive cleanup before releasing lock
             gc.collect()
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            log_memory(local_rank, "POST-GC")
+
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
     
@@ -186,9 +202,15 @@ def main():
     torch.distributed.barrier()
     log(local_rank, "MODEL: all ranks have loaded model")
     
-    # Setup LoRA
+    # Setup LoRA - enable gradient checkpointing BEFORE LoRA to save memory
+    # NOTE: Model is still on CPU at this point - FSDP will move to GPU after wrapping
     log(local_rank, "LORA: configuring...")
     model.gradient_checkpointing_enable()
+    
+    # Aggressive cleanup before LoRA setup
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     
     lora_config = LoraConfig(
         r=64,
@@ -203,16 +225,31 @@ def main():
     if local_rank == 0:
         model.print_trainable_parameters()
     
+    # Cleanup after LoRA setup (model still on CPU - FSDP will handle GPU)
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     log_memory(local_rank, "POST-LORA")
 
-    # Training config - use DDP
-    log(local_rank, "CONFIG: creating SFTConfig...")
+    # Training config - optimized for 32B model memory efficiency
+    log(local_rank, "CONFIG: creating SFTConfig (memory-optimized)...")
+
+    # Adjust batch size based on model size
+    if "32b" in MODEL.lower():
+        batch_size = 1  # Very conservative for 32B model
+        grad_accum_steps = 8
+        seq_length = 1024  # Shorter sequences save memory
+    else:
+        batch_size = 2
+        grad_accum_steps = 4
+        seq_length = 2048
+
     sft_config = SFTConfig(
         output_dir="./output",
         num_train_epochs=1,
-        max_seq_length=2048,
-        per_device_train_batch_size=2,
-        gradient_accumulation_steps=4,
+        max_seq_length=seq_length,
+        per_device_train_batch_size=batch_size,
+        gradient_accumulation_steps=grad_accum_steps,
         learning_rate=2e-5,
         warmup_ratio=0.03,
         bf16=True,
@@ -228,7 +265,20 @@ def main():
         dataloader_num_workers=0,
         dataloader_pin_memory=False,
         ddp_find_unused_parameters=False,
+        # FSDP for large model sharding (critical for 32B)
+        # OPTIMIZED: Use full_shard with auto_wrap for optimal memory distribution
+        fsdp="full_shard auto_wrap",
+        fsdp_config={
+            "fsdp_transformer_layer_cls_to_wrap": ["Qwen2DecoderLayer"],
+            "fsdp_offload_params": False,  # Keep on GPU for speed
+            "fsdp_state_dict_type": "SHARDED_STATE_DICT",  # More memory efficient than FULL_STATE_DICT
+            "fsdp_min_num_params": 1e8,  # Wrap large layers
+            "fsdp_use_orig_params": True,  # Better memory efficiency with LoRA
+            "fsdp_sync_module_states": True,  # Ensure consistency across ranks
+        },
     )
+
+    log(local_rank, f"CONFIG: batch_size={batch_size}, grad_accum={grad_accum_steps}, seq_len={seq_length}")
     log(local_rank, "CONFIG: OK")
 
     # Create trainer
@@ -247,6 +297,12 @@ def main():
         raise
     
     log_memory(local_rank, "POST-TRAINER")
+    
+    # Final cleanup before training starts
+    gc.collect()
+    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize(device)
 
     # Train
     log(local_rank, "TRAIN: starting...")
@@ -257,6 +313,10 @@ def main():
         log(local_rank, f"TRAIN: FAILED - {type(e).__name__}: {e}")
         log(local_rank, f"Traceback:\n{traceback.format_exc()}")
         raise
+    finally:
+        # Cleanup after training
+        gc.collect()
+        torch.cuda.empty_cache()
     
     if local_rank == 0:
         log(local_rank, "SAVE: saving model...")
