@@ -4,10 +4,11 @@
 set -e
 
 MODEL_SIZE=${1:-32b}
-# Allow override of GPU count for testing
-NUM_GPUS=${NUM_GPUS:-8}
+# Auto-detect GPU count, or allow override for testing
+NUM_GPUS=${NUM_GPUS:-$(nvidia-smi -L | wc -l)}
 # Export MODEL_SIZE for use in Python scripts
 export MODEL_SIZE
+export NUM_GPUS
 
 # Nuclear environment variables - Force Python to release memory immediately
 export MALLOC_CONF="dirty_decay_ms:0,muzzy_decay_ms:0"
