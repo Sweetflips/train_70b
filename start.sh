@@ -185,18 +185,21 @@ def apply_template(examples):
         texts.append(text)
     return {"text": texts}
 
-# Step 1: Apply chat template (fast, can use many cores)
+# Step 1: Apply chat template (fast, but limit processes to avoid thrashing)
+# 192 cores creates too many processes fighting for I/O - cap at 16 for optimal speed
 print("Step 1/2: Applying chat templates...")
+NUM_WORKERS = min(16, os.cpu_count() or 1)
+print(f"  Using {NUM_WORKERS} workers...")
 dataset = dataset.map(
     apply_template,
     batched=True,
     batch_size=10000,  # Large batches for template application
-    num_proc=os.cpu_count(),  # Use all CPU cores
+    num_proc=NUM_WORKERS,
     remove_columns=dataset.column_names,
     desc="Applying templates"
 )
 
-# Step 2: Tokenize (slower, but optimized)
+# Step 2: Tokenize (I/O-bound, use same capped workers)
 print("Step 2/2: Tokenizing texts...")
 def tokenize_texts(examples):
     return tokenizer(examples["text"], truncation=True, max_length=2048, padding=False)
@@ -205,7 +208,7 @@ tokenized_dataset = dataset.map(
     tokenize_texts,
     batched=True,
     batch_size=5000,  # Larger batches for tokenization
-    num_proc=os.cpu_count(),  # Use all CPU cores
+    num_proc=NUM_WORKERS,  # Same capped worker count
     desc="Tokenizing"
 )
 
