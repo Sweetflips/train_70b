@@ -45,8 +45,12 @@ def main():
         model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.bfloat16, trust_remote_code=True)
     
     print("Model structure initialized on meta device (0 CPU RAM used)")
-    print("DeepSpeed will load weights directly to GPUs during trainer initialization")
-
+    
+    # DeepSpeed will load weights directly to GPUs during trainer initialization
+    # We need to provide the model path for DeepSpeed to load weights
+    # Store it as an attribute so DeepSpeed can access it
+    model.config._name_or_path = MODEL
+    
     print("Preparing model for LoRA training...")
     # Apply LoRA (not QLoRA - no quantization needed on B200s)
     model = get_peft_model(model, LoraConfig(
