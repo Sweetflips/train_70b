@@ -61,8 +61,8 @@ dataset = dataset.map(fmt, remove_columns=dataset.column_names)
 sft_config = SFTConfig(
     output_dir="./output",
     num_train_epochs=1,
-    per_device_train_batch_size=2,  # B200 180GB can handle batch=2
-    gradient_accumulation_steps=16,
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=32,
     learning_rate=1e-4,
     warmup_ratio=0.03,
     bf16=True,
@@ -72,9 +72,9 @@ sft_config = SFTConfig(
     gradient_checkpointing=True,
     report_to="none",
     # SFT-specific args
-    max_seq_length=4096,
+    max_seq_length=2048,
     dataset_text_field="text",
-    packing=True,
+    packing=False,
 )
 
 trainer = SFTTrainer(
