@@ -185,30 +185,27 @@ def apply_template(examples):
         texts.append(text)
     return {"text": texts}
 
-# Step 1: Apply chat template (fast, but limit processes to avoid thrashing)
-# 192 cores creates too many processes fighting for I/O - cap at 16 for optimal speed
-print("Step 1/2: Applying chat templates...")
-NUM_WORKERS = min(16, os.cpu_count() or 1)
-print(f"  Using {NUM_WORKERS} workers...")
+# Step 1: Apply chat template (fast, can use many cores)
+print("Step 1/2: Applying chat templates (optimized for speed)...\n")
 dataset = dataset.map(
     apply_template,
     batched=True,
-    batch_size=10000,  # Large batches for template application
-    num_proc=NUM_WORKERS,
+    batch_size=20000,  # Doubled batch size for template application
+    num_proc=min(os.cpu_count(), 32),  # Limit processes to reduce overhead
     remove_columns=dataset.column_names,
     desc="Applying templates"
 )
 
-# Step 2: Tokenize (I/O-bound, use same capped workers)
-print("Step 2/2: Tokenizing texts...")
+# Step 2: Tokenize (slower, but optimized for memory and speed)
+print("\nStep 2/2: Tokenizing texts (optimized for speed)...\n")
 def tokenize_texts(examples):
     return tokenizer(examples["text"], truncation=True, max_length=2048, padding=False)
 
 tokenized_dataset = dataset.map(
     tokenize_texts,
     batched=True,
-    batch_size=5000,  # Larger batches for tokenization
-    num_proc=NUM_WORKERS,  # Same capped worker count
+    batch_size=10000,  # Doubled batch size for tokenization
+    num_proc=min(os.cpu_count(), 16),  # Limit processes further for memory-intensive tokenization
     desc="Tokenizing"
 )
 
@@ -240,9 +237,8 @@ export TOKENIZERS_PARALLELISM=false
 export HF_DATASETS_NUM_PROC=1
 
 # PyTorch memory settings - CRITICAL for preventing OOM
-# Unified configuration: expandable segments + conservative split size
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True,max_split_size_mb:256"
-# Note: PYTORCH_ALLOC_CONF is deprecated, use PYTORCH_CUDA_ALLOC_CONF instead
+# Note: PYTORCH_ALLOC_CONF is the new name (PYTORCH_CUDA_ALLOC_CONF is deprecated)
+export PYTORCH_ALLOC_CONF="expandable_segments:True,max_split_size_mb:256"
 
 # NCCL settings - CRITICAL for preventing std::bad_alloc
 export NCCL_DEBUG=INFO
@@ -262,7 +258,11 @@ export NCCL_SOCKET_IFNAME=lo          # Use localhost
 
 # CUDA settings - limit memory allocation
 export CUDA_DEVICE_MAX_CONNECTIONS=1  # Reduce connection overhead
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+# Set CUDA_VISIBLE_DEVICES based on actual GPU count (don't hardcode 8)
+if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
+    GPU_IDS=$(seq -s, 0 $((NUM_GPUS-1)))
+    export CUDA_VISIBLE_DEVICES="$GPU_IDS"
+fi
 export CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=100
 export CUDA_MPS_PINNED_MEMORY_SIZE=0
 
@@ -335,8 +335,15 @@ import torch.distributed as dist
 dist.init_process_group(backend='nccl', world_size=1, rank=0)
 print(f'NCCL init success! Backend: {dist.get_backend()}')
 dist.destroy_process_group()
+torch.cuda.empty_cache()
+import gc; gc.collect()
 print('NCCL test passed!')
 " || { echo "NCCL single-process test FAILED!"; exit 1; }
+
+# Cleanup after tests before training
+echo "Cleaning up test processes..."
+pkill -9 python 2>/dev/null || true
+sleep 2
 
 echo ""
 echo "Pre-flight tests passed. Starting distributed training with FSDP..."
