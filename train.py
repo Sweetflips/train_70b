@@ -3,9 +3,10 @@
 import os
 import torch
 import sys
+import deepspeed
 from accelerate import Accelerator
 from datasets import load_from_disk
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM
 from peft import LoraConfig, get_peft_model
 from trl import SFTConfig, SFTTrainer
 
@@ -36,20 +37,22 @@ def train():
     dataset = load_from_disk("./tokenized_data", keep_in_memory=False)
     print(f"[Rank {local_rank}] Dataset loaded successfully!")
 
-    # 3. SEQUENTIAL MODEL LOADING
-    # This prevents 8 processes from hitting CPU RAM at once
-    print(f"[Rank {local_rank}] Starting sequential model loading...")
+    # 3. SEQUENTIAL MODEL LOADING WITH ZeRO-3 SHARDING
+    # Sequential barrier prevents simultaneous CPU spikes
+    # ZeRO-3 shards weights during loading, avoiding 8x CPU RAM usage
+    print(f"[Rank {local_rank}] Starting sequential model loading with ZeRO-3...")
     for i in range(accelerator.num_processes):
         if local_rank == i:
-            print(f"[Rank {i}] Loading model...")
-            model = AutoModelForCausalLM.from_pretrained(
-                MODEL,
-                torch_dtype=torch.bfloat16,
-                trust_remote_code=True,
-                low_cpu_mem_usage=True,  # Critical: prevents RAM spike
-                device_map=None,  # DeepSpeed handles this
-            )
-            print(f"[Rank {i}] Model loaded successfully!")
+            print(f"[Rank {i}] Loading model shard...")
+            with deepspeed.zero.Init():
+                model = AutoModelForCausalLM.from_pretrained(
+                    MODEL,
+                    torch_dtype=torch.bfloat16,
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True,
+                    device_map=None,  # DeepSpeed handles placement
+                )
+            print(f"[Rank {i}] Model shard loaded successfully!")
         accelerator.wait_for_everyone()
 
     # 4. Prepare model for LoRA training
