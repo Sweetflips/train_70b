@@ -3,21 +3,56 @@
 import os
 import sys
 import json
+import traceback
+import gc
 
 # Fix deprecated env var warning
 if "PYTORCH_CUDA_ALLOC_CONF" in os.environ:
     os.environ["PYTORCH_ALLOC_CONF"] = os.environ.pop("PYTORCH_CUDA_ALLOC_CONF")
 
-import torch
-import deepspeed
-from datasets import load_from_disk
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
-from peft import LoraConfig, get_peft_model
-from trl import SFTConfig, SFTTrainer
+def log(rank, msg):
+    """Verbose logging with rank prefix."""
+    print(f"[Rank {rank}] {msg}", flush=True)
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+def log_memory(rank, label):
+    """Log current memory usage."""
+    import subprocess
+    try:
+        # System RAM
+        with open('/proc/meminfo', 'r') as f:
+            meminfo = f.read()
+        mem_total = int([x for x in meminfo.split('\n') if 'MemTotal' in x][0].split()[1]) // 1024
+        mem_avail = int([x for x in meminfo.split('\n') if 'MemAvailable' in x][0].split()[1]) // 1024
+        mem_used = mem_total - mem_avail
+        log(rank, f"[MEM:{label}] RAM: {mem_used:,}MB / {mem_total:,}MB used ({100*mem_used/mem_total:.1f}%)")
+        
+        # GPU memory (only rank 0 to avoid spam)
+        if rank == 0:
+            result = subprocess.run(
+                ['nvidia-smi', '--query-gpu=index,memory.used,memory.total', '--format=csv,noheader,nounits'],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                for line in result.stdout.strip().split('\n'):
+                    parts = line.split(', ')
+                    if len(parts) == 3:
+                        idx, used, total = parts
+                        log(rank, f"[MEM:{label}] GPU{idx}: {used}MB / {total}MB")
+    except Exception as e:
+        log(rank, f"[MEM:{label}] Failed to get memory: {e}")
 
 def main():
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
+    
+    log(local_rank, "="*60)
+    log(local_rank, f"INIT: rank={local_rank}, world_size={world_size}")
+    log(local_rank, f"INIT: CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'not set')}")
+    log(local_rank, "="*60)
+    
+    log_memory(local_rank, "START")
     
     # Model selection
     MODELS = {
@@ -27,39 +62,109 @@ def main():
     model_arg = sys.argv[1] if len(sys.argv) > 1 else "14b"
     MODEL = MODELS.get(model_arg, MODELS["14b"])
     
-    print(f"[Rank {local_rank}/{world_size}] Training: {MODEL}", flush=True)
+    log(local_rank, f"MODEL: {MODEL}")
+
+    # Import heavy libraries with logging
+    log(local_rank, "IMPORT: torch...")
+    import torch
+    log(local_rank, f"IMPORT: torch OK (version={torch.__version__}, cuda={torch.cuda.is_available()})")
+    
+    log(local_rank, "IMPORT: deepspeed...")
+    import deepspeed
+    log(local_rank, f"IMPORT: deepspeed OK (version={deepspeed.__version__})")
+    
+    log(local_rank, "IMPORT: transformers...")
+    from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+    log(local_rank, "IMPORT: transformers OK")
+    
+    log(local_rank, "IMPORT: peft...")
+    from peft import LoraConfig, get_peft_model
+    log(local_rank, "IMPORT: peft OK")
+    
+    log(local_rank, "IMPORT: trl...")
+    from trl import SFTConfig, SFTTrainer
+    log(local_rank, "IMPORT: trl OK")
+    
+    log(local_rank, "IMPORT: datasets...")
+    from datasets import load_from_disk
+    log(local_rank, "IMPORT: datasets OK")
+    
+    log_memory(local_rank, "POST-IMPORT")
 
     # Load tokenizer
-    print(f"[Rank {local_rank}] Loading tokenizer...", flush=True)
+    log(local_rank, "TOKENIZER: loading...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
+    log(local_rank, "TOKENIZER: OK")
+    
+    log_memory(local_rank, "POST-TOKENIZER")
     
     # Load dataset
-    print(f"[Rank {local_rank}] Loading dataset...", flush=True)
+    log(local_rank, "DATASET: loading from ./tokenized_data...")
     dataset = load_from_disk("./tokenized_data", keep_in_memory=False)
-    print(f"[Rank {local_rank}] Dataset: {len(dataset)} examples", flush=True)
+    log(local_rank, f"DATASET: OK ({len(dataset)} examples)")
+    
+    log_memory(local_rank, "POST-DATASET")
 
-    # Load DeepSpeed config for ZeRO-3 init
+    # Load DeepSpeed config
+    log(local_rank, "DEEPSPEED: loading ds_config.json...")
     with open("ds_config.json", "r") as f:
         ds_config = json.load(f)
+    log(local_rank, f"DEEPSPEED: config loaded: {json.dumps(ds_config, indent=2)}")
 
-    # Load model INSIDE deepspeed.zero.Init() context
-    # This partitions weights across GPUs immediately, avoiding 8x RAM spike
-    print(f"[Rank {local_rank}] Loading model with ZeRO-3 init (distributed load)...", flush=True)
-    with deepspeed.zero.Init(config_dict_or_path=ds_config):
-        model = AutoModelForCausalLM.from_pretrained(
-            MODEL,
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True,
-            low_cpu_mem_usage=True,
-            attn_implementation="flash_attention_2",
-        )
-    print(f"[Rank {local_rank}] Model loaded (ZeRO-3 partitioned)!", flush=True)
+    # Initialize distributed if not already done
+    log(local_rank, "DISTRIBUTED: checking init state...")
+    if not torch.distributed.is_initialized():
+        log(local_rank, "DISTRIBUTED: initializing process group...")
+        deepspeed.init_distributed()
+        log(local_rank, "DISTRIBUTED: initialized OK")
+    else:
+        log(local_rank, "DISTRIBUTED: already initialized")
+    
+    log_memory(local_rank, "POST-DISTRIBUTED")
+    
+    # Sync all ranks before model load
+    log(local_rank, "BARRIER: waiting for all ranks before model load...")
+    torch.distributed.barrier()
+    log(local_rank, "BARRIER: passed")
+
+    # Load model with ZeRO-3 init
+    log(local_rank, "MODEL: entering deepspeed.zero.Init() context...")
+    try:
+        with deepspeed.zero.Init(config_dict_or_path=ds_config):
+            log(local_rank, "MODEL: inside ZeRO-3 context, calling from_pretrained...")
+            log_memory(local_rank, "PRE-MODEL-LOAD")
+            
+            model = AutoModelForCausalLM.from_pretrained(
+                MODEL,
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=True,
+                low_cpu_mem_usage=True,
+                attn_implementation="flash_attention_2",
+            )
+            log(local_rank, "MODEL: from_pretrained completed!")
+            log_memory(local_rank, "POST-MODEL-LOAD")
+            
+    except Exception as e:
+        log(local_rank, f"MODEL: FAILED with exception: {type(e).__name__}: {e}")
+        log(local_rank, f"MODEL: traceback:\n{traceback.format_exc()}")
+        log_memory(local_rank, "MODEL-FAILED")
+        raise
+    
+    log(local_rank, "MODEL: exited ZeRO-3 context successfully")
+    log_memory(local_rank, "POST-ZERO3-CONTEXT")
+    
+    # Force garbage collection
+    gc.collect()
+    torch.cuda.empty_cache()
+    log_memory(local_rank, "POST-GC")
 
     # Setup LoRA
-    print(f"[Rank {local_rank}] Setting up LoRA...", flush=True)
+    log(local_rank, "LORA: enabling gradient checkpointing...")
     model.gradient_checkpointing_enable()
+    log(local_rank, "LORA: gradient checkpointing enabled")
     
+    log(local_rank, "LORA: creating LoraConfig...")
     lora_config = LoraConfig(
         r=64,
         lora_alpha=128,
@@ -68,12 +173,17 @@ def main():
         bias="none",
         task_type="CAUSAL_LM"
     )
+    log(local_rank, "LORA: applying get_peft_model...")
     model = get_peft_model(model, lora_config)
+    log(local_rank, "LORA: PEFT model created")
     
     if local_rank == 0:
         model.print_trainable_parameters()
+    
+    log_memory(local_rank, "POST-LORA")
 
     # Training config
+    log(local_rank, "CONFIG: creating SFTConfig...")
     sft_config = SFTConfig(
         output_dir="./output",
         num_train_epochs=1,
@@ -97,22 +207,45 @@ def main():
         deepspeed="ds_config.json",
         ddp_find_unused_parameters=False,
     )
+    log(local_rank, "CONFIG: SFTConfig created")
 
     # Train
-    print(f"[Rank {local_rank}] Starting trainer...", flush=True)
-    trainer = SFTTrainer(
-        model=model,
-        args=sft_config,
-        train_dataset=dataset,
-        tokenizer=tokenizer,
-    )
+    log(local_rank, "TRAINER: creating SFTTrainer...")
+    try:
+        trainer = SFTTrainer(
+            model=model,
+            args=sft_config,
+            train_dataset=dataset,
+            tokenizer=tokenizer,
+        )
+        log(local_rank, "TRAINER: created successfully")
+    except Exception as e:
+        log(local_rank, f"TRAINER: FAILED with exception: {type(e).__name__}: {e}")
+        log(local_rank, f"TRAINER: traceback:\n{traceback.format_exc()}")
+        log_memory(local_rank, "TRAINER-FAILED")
+        raise
+    
+    log_memory(local_rank, "POST-TRAINER")
 
-    print(f"[Rank {local_rank}] Training...", flush=True)
-    trainer.train()
+    log(local_rank, "TRAIN: starting trainer.train()...")
+    try:
+        trainer.train()
+        log(local_rank, "TRAIN: completed successfully!")
+    except Exception as e:
+        log(local_rank, f"TRAIN: FAILED with exception: {type(e).__name__}: {e}")
+        log(local_rank, f"TRAIN: traceback:\n{traceback.format_exc()}")
+        log_memory(local_rank, "TRAIN-FAILED")
+        raise
     
     if local_rank == 0:
+        log(local_rank, "SAVE: saving model to ./output...")
         trainer.save_model("./output")
-        print("Done! Model saved to ./output")
+        log(local_rank, "SAVE: Done! Model saved to ./output")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(f"[FATAL] Uncaught exception: {type(e).__name__}: {e}", flush=True)
+        print(f"[FATAL] Traceback:\n{traceback.format_exc()}", flush=True)
+        sys.exit(1)
