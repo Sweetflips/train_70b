@@ -133,8 +133,22 @@ EOF
 fi
 echo "Dataset: $(wc -l < $DATASET) examples"
 
-# Step 4: Start training
-echo "[4/4] Starting QLoRA training..."
+# Step 4: Setup swap space (prevents std::bad_alloc)
+echo "[4/5] Setting up swap space..."
+if [ ! -f /swapfile ]; then
+    echo "Creating 128GB swap file..."
+    sudo fallocate -l 128G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1G count=128 2>/dev/null
+    sudo chmod 600 /swapfile
+    sudo mkswap /swapfile 2>/dev/null || true
+    sudo swapon /swapfile 2>/dev/null || true
+    echo "Swap enabled: $(free -h | grep Swap)"
+fi
+
+# Step 5: Start training
+echo "[5/5] Starting QLoRA training..."
+# Set memory allocator config to reduce fragmentation
+export MALLOC_CONF="dirty_decay_ms:1000,muzzy_decay_ms:1000"
+
 # Use DeepSpeed ZeRO-3 to shard model across 8 GPUs (prevents OOM)
 accelerate launch \
     --multi_gpu \

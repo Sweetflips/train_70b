@@ -36,12 +36,17 @@ def main():
         bnb_4bit_use_double_quant=True
     )
 
-    # Let accelerate handle device placement
+    # Use low_cpu_mem_usage and device_map to prevent OOM during model loading
+    from accelerate import Accelerator
+    accelerator = Accelerator()
+    
     model = AutoModelForCausalLM.from_pretrained(
         MODEL,
         quantization_config=bnb_config,
+        device_map={"": accelerator.local_process_index},  # Map each process to its GPU
         trust_remote_code=True,
-        dtype=torch.bfloat16
+        dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,  # Critical: prevents RAM spike during loading
     )
 
     print("Preparing model for training...")
@@ -54,15 +59,23 @@ def main():
     ))
     model.print_trainable_parameters()
 
-    print("Loading dataset...")
-    dataset = load_dataset("json", data_files=DATA, split="train")
-
-    print("Processing dataset...")
+    print("Loading dataset (memory-mapped)...")
+    # Memory-mapped loading - doesn't load entire dataset into RAM
+    dataset = load_dataset("json", data_files=DATA, split="train", streaming=False)
+    
+    print("Processing dataset (batched to reduce memory)...")
     def fmt(ex):
         # Data is now standardized to "messages" format in start.sh
         return {"text": tokenizer.apply_chat_template(ex["messages"], tokenize=False)}
 
-    dataset = dataset.map(fmt, remove_columns=dataset.column_names)
+    # Use batched map to reduce memory spikes
+    dataset = dataset.map(
+        fmt,
+        remove_columns=dataset.column_names,
+        batched=True,
+        batch_size=1000,  # Process in batches to avoid RAM spike
+        desc="Formatting dataset"
+    )
 
     # Use TrainingArguments with DeepSpeed ZeRO-3 for memory efficiency
     training_args = TrainingArguments(
@@ -78,8 +91,9 @@ def main():
         optim="adamw_torch",
         gradient_checkpointing=True,
         report_to="none",
-        dataloader_num_workers=0,
-        dataloader_pin_memory=False,
+        dataloader_num_workers=0,  # Critical: prevents 64 threads (8 processes × 8 workers)
+        dataloader_pin_memory=False,  # Saves RAM
+        group_by_length=True,  # Helps with VRAM efficiency
         deepspeed="ds_config.json",  # DeepSpeed ZeRO-3 config
     )
 
