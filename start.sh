@@ -333,12 +333,12 @@ print('NCCL test passed!')
 " || { echo "NCCL single-process test FAILED!"; exit 1; }
 
 echo ""
-echo "Pre-flight tests passed. Starting distributed training..."
+echo "Pre-flight tests passed. Starting distributed training with FSDP..."
 echo "Starting Training on ${NUM_GPUS}x GPUs..."
+echo "(Using PyTorch FSDP instead of DeepSpeed to avoid memory issues)"
 echo ""
 
-# Launch with torchrun for better error messages
-# (accelerate launch sometimes swallows errors)
+# Launch with torchrun (native PyTorch distributed)
 torchrun \
     --standalone \
     --nnodes=1 \
