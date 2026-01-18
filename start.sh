@@ -24,7 +24,7 @@ echo "Model: $MODEL_SIZE | GPUs: $NUM_GPUS"
 echo "============================================"
 
 # Step 1: Check/install dependencies
-echo "[1/4] Setting up environment..."
+echo "[1/5] Setting up environment..."
 # Skip venv in container environments (RunPod Serverless)
 if [ -z "$RUNPOD_POD_ID" ] && [ ! -d "venv" ]; then
     python3 -m venv venv
@@ -46,7 +46,7 @@ else
 fi
 
 # Step 2: Download models
-echo "[2/4] Downloading Qwen models from HuggingFace..."
+echo "[2/5] Downloading Qwen models from HuggingFace..."
 # Check for HuggingFace token (supports both HF_TOKEN and HUGGING_FACE_HUB_TOKEN)
 HF_TOKEN=${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}
 if [ -z "$HF_TOKEN" ]; then
@@ -89,7 +89,7 @@ print(f"Done: {model}")
 EOF
 
 # Step 3: Download dataset
-echo "[3/4] Downloading 1M coding dataset..."
+echo "[3/5] Downloading 1M coding dataset..."
 DATASET="./curated_1m_dataset.jsonl"
 if [ ! -f "$DATASET" ]; then
     python3 << 'EOF'
@@ -154,7 +154,7 @@ fi
 echo "Dataset: $(wc -l < $DATASET) examples"
 
 # Step 4: Pre-tokenize dataset (Single Process - Prevents 8x RAM spike)
-echo "[4/6] Pre-tokenizing dataset (Single Process)..."
+echo "[4/5] Pre-tokenizing dataset..."
 if [ ! -d "./tokenized_data" ]; then
     python3 << 'EOF'
 import os
@@ -220,27 +220,8 @@ else
     echo "Pre-tokenized dataset already exists, skipping..."
 fi
 
-# Step 5: Setup swap space (prevents std::bad_alloc)
-echo "[5/6] Setting up swap space..."
-# Check if swapfile exists but is not active
-if [ -f /swapfile ]; then
-    if ! swapon --show | grep -q "/swapfile"; then
-        echo "Activating existing swapfile..."
-        sudo mkswap /swapfile 2>/dev/null || true
-        sudo swapon /swapfile 2>/dev/null || true
-    fi
-elif [ ! -f /swapfile ]; then
-    echo "Creating 64GB swap file..."
-    sudo fallocate -l 64G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1G count=64 status=progress 2>/dev/null
-    sudo chmod 600 /swapfile
-    sudo mkswap /swapfile
-    sudo swapon /swapfile
-fi
-echo "Swap status: $(swapon --show 2>/dev/null || echo 'none')"
-echo "Memory: $(free -h | grep -E 'Mem|Swap')"
-
-# Step 6: Start training
-echo "[6/6] Starting BF16 LoRA training with DeepSpeed ZeRO-3..."
+# Step 5: Start training
+echo "[5/5] Starting BF16 LoRA training..."
 
 # Kill any zombie processes first
 echo "Cleaning up zombie processes..."
