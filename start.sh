@@ -237,26 +237,21 @@ sleep 3
 # Clear GPU memory
 python3 -c "import torch; [torch.cuda.empty_cache() for _ in range(torch.cuda.device_count())]" 2>/dev/null || true
 
-# Strict memory allocation settings
-export MALLOC_CONF="dirty_decay_ms:0,muzzy_decay_ms:0,background_thread:false"
-export MALLOC_MMAP_THRESHOLD_=131072
+# Environment settings
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export TOKENIZERS_PARALLELISM=false
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
-
-# NCCL settings for stability
-export NCCL_DEBUG=WARN
-export NCCL_ASYNC_ERROR_HANDLING=1
-export NCCL_IB_DISABLE=0
-export NCCL_P2P_LEVEL=NVL
-
-# Increase system limits for 8-way distributed training
-ulimit -n 65535 2>/dev/null || true
-ulimit -s unlimited 2>/dev/null || true
-
-# Prevent HuggingFace from over-threading
 export HF_DATASETS_NUM_PROC=1
+
+# Use new env var name (PYTORCH_CUDA_ALLOC_CONF is deprecated)
+export PYTORCH_ALLOC_CONF="expandable_segments:True"
+
+# NCCL settings
+export NCCL_DEBUG=INFO
+export NCCL_ASYNC_ERROR_HANDLING=1
+
+# System limits
+ulimit -n 65535 2>/dev/null || true
 
 # Show memory before launch
 echo "=== Memory before training ==="
@@ -264,13 +259,11 @@ free -h
 nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv
 echo "=============================="
 
-# Use torchrun directly (less overhead than accelerate)
-echo "Starting Training on ${NUM_GPUS}x B200 with torchrun..."
-torchrun \
-    --nproc_per_node=$NUM_GPUS \
-    --master_port=29500 \
-    --nnodes=1 \
-    --node_rank=0 \
+# Launch with accelerate (handles DeepSpeed init properly)
+echo "Starting Training on ${NUM_GPUS}x GPUs..."
+accelerate launch \
+    --config_file accelerate_config.yaml \
+    --num_processes $NUM_GPUS \
     train.py $MODEL_SIZE
 
 echo "============================================"
