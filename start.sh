@@ -220,15 +220,20 @@ if [ ! -f /swapfile ]; then
 fi
 
 # Step 6: Start training
-echo "[6/6] Starting BF16 LoRA training with DeepSpeed ZeRO-2..."
+echo "[6/6] Starting BF16 LoRA training with DeepSpeed ZeRO-3..."
 
 # Kill any zombie processes first
 pkill -9 python 2>/dev/null || true
 sleep 2
 
-# Set strict memory limits
+# Force the OS to reclaim memory (nuclear option)
+sync && echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+
+# Strict memory allocation settings
 export MALLOC_CONF="dirty_decay_ms:0,muzzy_decay_ms:0"
 export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export TOKENIZERS_PARALLELISM=false
 
 # Increase system limits for 8-way distributed training
 ulimit -n 65535 2>/dev/null || true
@@ -239,6 +244,7 @@ export HF_DATASETS_NUM_PROC=1
 
 # Use fixed config file to bypass accelerate's system scanning (prevents RAM spike)
 # Sequential loading ensures only one process loads model at a time (64GB vs 512GB)
+# Dataset loading inside train() function prevents multiprocessing memory duplication
 echo "Starting Training on 8x B200..."
 accelerate launch --config_file accelerate_config.yaml train.py $MODEL_SIZE
 
