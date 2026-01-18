@@ -33,10 +33,10 @@ bnb_config = BitsAndBytesConfig(
     bnb_4bit_use_double_quant=True
 )
 
+# For DeepSpeed compatibility, don't use device_map="auto" - let DeepSpeed handle device placement
 model = AutoModelForCausalLM.from_pretrained(
     MODEL,
     quantization_config=bnb_config,
-    device_map="auto",
     trust_remote_code=True,
     dtype=torch.bfloat16  # Updated from torch_dtype
 )
@@ -61,18 +61,18 @@ dataset = dataset.map(fmt, remove_columns=dataset.column_names)
 sft_config = SFTConfig(
     output_dir="./output",
     num_train_epochs=1,
-    per_device_train_batch_size=1,
-    gradient_accumulation_steps=32,
+    per_device_train_batch_size=2,  # Increased for B200 GPUs
+    gradient_accumulation_steps=32,  # Full gradient accumulation for B200
     learning_rate=1e-4,
     warmup_ratio=0.03,
     bf16=True,
     logging_steps=10,
     save_steps=500,
-    optim="paged_adamw_8bit",
+    # Remove optim - let DeepSpeed handle optimizer
     gradient_checkpointing=True,
     report_to="none",
     # SFT-specific args
-    max_seq_length=2048,
+    max_seq_length=2048,  # Full sequence length for B200 GPUs
     dataset_text_field="text",
     packing=False,
 )

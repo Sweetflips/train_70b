@@ -4,7 +4,8 @@
 set -e
 
 MODEL_SIZE=${1:-72b}
-NUM_GPUS=$(nvidia-smi -L | wc -l)
+# Use 8 GPUs for B200 setup (override auto-detection)
+NUM_GPUS=8
 
 echo "============================================"
 echo "Sweetflips Training Pipeline"
@@ -134,11 +135,8 @@ echo "Dataset: $(wc -l < $DATASET) examples"
 
 # Step 4: Start training
 echo "[4/4] Starting QLoRA training..."
-accelerate launch \
-    --multi_gpu \
-    --num_processes $NUM_GPUS \
-    --mixed_precision bf16 \
-    train.py $MODEL_SIZE
+# Use existing accelerate config (DeepSpeed ZeRO-2) instead of overriding
+accelerate launch train.py $MODEL_SIZE
 
 echo "============================================"
 echo "Training Complete!"
