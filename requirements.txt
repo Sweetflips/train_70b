@@ -1,0 +1,29 @@
+# Core ML/DL Libraries
+torch>=2.1.0
+transformers>=4.40.0
+datasets>=2.16.0
+accelerate>=0.27.0
+
+# LoRA and PEFT
+peft>=0.9.0
+
+# Training Library (TRL) - Required for SFTTrainer
+trl>=0.13.0
+
+# Quantization Support
+bitsandbytes>=0.41.0
+
+# HuggingFace Hub (for model/dataset downloads)
+huggingface_hub>=0.20.0
+
+# DeepSpeed (optional, for ZeRO optimization if needed)
+deepspeed>=0.12.0
+
+# Flash Attention 2 (optional but recommended for memory efficiency)
+# Note: flash-attn requires CUDA and may need to be installed separately
+# Installation: pip install flash-attn --no-build-isolation
+# If installation fails, the code will fall back to default attention
+# flash-attn>=2.5.0; platform_system != "Windows" and sys_platform != "win32"
+
+# Standard library dependencies (pre-installed with Python):
+# - os, sys, time, traceback, gc, fcntl, subprocess, resource, json

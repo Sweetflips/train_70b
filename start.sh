@@ -32,9 +32,18 @@ if [ -z "$RUNPOD_POD_ID" ] && [ ! -d "venv" ]; then
 elif [ -d "venv" ]; then
     source venv/bin/activate
 fi
-# Upgrade trl to latest (0.13+) for new SFTConfig API
-pip install -q --upgrade torch transformers datasets accelerate peft bitsandbytes huggingface_hub deepspeed 2>/dev/null || true
-pip install -q --upgrade "trl>=0.13.0" 2>/dev/null || true
+# Install dependencies from requirements.txt
+if [ -f "requirements.txt" ]; then
+    echo "Installing dependencies from requirements.txt..."
+    pip install -q --upgrade -r requirements.txt 2>/dev/null || true
+else
+    # Fallback: install packages directly if requirements.txt not found
+    echo "requirements.txt not found, installing packages directly..."
+    pip install -q --upgrade torch transformers datasets accelerate peft bitsandbytes huggingface_hub deepspeed 2>/dev/null || true
+    pip install -q --upgrade "trl>=0.13.0" 2>/dev/null || true
+    # Try to install flash-attn (may fail on some systems, that's OK)
+    pip install -q --upgrade flash-attn --no-build-isolation 2>/dev/null || echo "flash-attn installation skipped (optional)"
+fi
 
 # Step 2: Download models
 echo "[2/4] Downloading Qwen models from HuggingFace..."

@@ -1,0 +1,13 @@
+# Optional dependencies for enhanced performance
+# Install these separately if needed:
+# pip install -r requirements-optional.txt
+
+# Flash Attention 2 (requires CUDA, may need separate installation)
+# Try: pip install flash-attn --no-build-isolation
+flash-attn>=2.5.0
+
+# For faster compilation
+ninja>=1.11.0
+
+# Version parsing utilities
+packaging>=21.0

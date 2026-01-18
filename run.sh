@@ -11,7 +11,11 @@ echo "QLoRA Training: $MODEL_SIZE on $NUM_GPUS GPUs"
 echo "============================================"
 
 # Install deps
-pip install -q bitsandbytes accelerate peft trl datasets transformers huggingface_hub
+if [ -f "requirements.txt" ]; then
+    pip install -q -r requirements.txt
+else
+    pip install -q bitsandbytes accelerate peft trl datasets transformers huggingface_hub
+fi
 
 # Download models first
 echo "Downloading models..."

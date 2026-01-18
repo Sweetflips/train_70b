@@ -176,12 +176,21 @@ def main():
         try:
             # Load model to CPU - FSDP will shard and move to GPU efficiently
             # Using device_map=None loads to CPU, avoiding GPU OOM before FSDP wraps
+            # Try flash_attention_2, fallback to default if not available
+            try:
+                import flash_attn
+                attn_impl = "flash_attention_2"
+                log(local_rank, "Using flash_attention_2")
+            except ImportError:
+                attn_impl = "sdpa"  # PyTorch native SDPA
+                log(local_rank, "flash_attention_2 not available, using sdpa")
+            
             model = AutoModelForCausalLM.from_pretrained(
                 MODEL,
                 torch_dtype=torch.bfloat16,
                 trust_remote_code=True,
                 low_cpu_mem_usage=True,
-                attn_implementation="flash_attention_2",
+                attn_implementation=attn_impl,
                 device_map=None,  # Load to CPU - FSDP will handle GPU placement
             )
             log(local_rank, "MODEL: loaded to CPU!")
