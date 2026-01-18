@@ -49,14 +49,22 @@ def main():
     log(local_rank, f"INIT: rank={local_rank}/{world_size}")
     log(local_rank, "="*60)
     
-    # Model selection
+    # Model selection - default to 14b (smaller, more stable)
     MODELS = {
         "14b": "Qwen/Qwen2.5-Coder-14B-Instruct",
         "32b": "Qwen/Qwen2.5-Coder-32B-Instruct",
     }
-    model_arg = sys.argv[1] if len(sys.argv) > 1 else "14b"
-    MODEL = MODELS.get(model_arg, MODELS["14b"])
+    model_arg = sys.argv[1] if len(sys.argv) > 1 else "32b"  # Changed default to 32b as requested
+    MODEL = MODELS.get(model_arg, MODELS["32b"])
     log(local_rank, f"MODEL: {MODEL}")
+
+    # Set memory limits before any CUDA operations
+    import resource
+    # Limit memory to 100GB per process (should be plenty for 32B model + overhead)
+    soft_limit = 100 * 1024 * 1024 * 1024  # 100GB in bytes
+    hard_limit = soft_limit * 2  # 200GB hard limit
+    resource.setrlimit(resource.RLIMIT_AS, (soft_limit, hard_limit))
+    log(local_rank, f"MEMORY: set RLIMIT_AS to {soft_limit//(1024**3)}GB")
 
     # =========================================================================
     # CRITICAL: Use file lock to serialize ALL heavy operations

@@ -3,9 +3,9 @@
 # Usage: ./start.sh [14b|32b|72b]
 set -e
 
-MODEL_SIZE=${1:-14b}
-# Use 8 GPUs for B200 setup (override auto-detection)
-NUM_GPUS=8
+MODEL_SIZE=${1:-32b}
+# Allow override of GPU count for testing
+NUM_GPUS=${NUM_GPUS:-8}
 # Export MODEL_SIZE for use in Python scripts
 export MODEL_SIZE
 
@@ -245,25 +245,37 @@ export MKL_NUM_THREADS=1
 export TOKENIZERS_PARALLELISM=false
 export HF_DATASETS_NUM_PROC=1
 
-# PyTorch memory settings
-export PYTORCH_ALLOC_CONF="expandable_segments:True"
+# PyTorch memory settings - CRITICAL for preventing OOM
+export PYTORCH_ALLOC_CONF="expandable_segments:True,max_split_size_mb:512"
 
 # NCCL settings - CRITICAL for preventing std::bad_alloc
 export NCCL_DEBUG=INFO
 export NCCL_ASYNC_ERROR_HANDLING=1
 # Limit NCCL buffer sizes to prevent massive initial allocation
-export NCCL_BUFFSIZE=2097152          # 2MB instead of default (can be much larger)
-export NCCL_NTHREADS=64               # Reduce thread count
-export NCCL_MAX_NCHANNELS=2           # Limit channels (default can be 32+)
+export NCCL_BUFFSIZE=1048576          # 1MB instead of default (can be much larger)
+export NCCL_NTHREADS=32               # Reduce thread count
+export NCCL_MAX_NCHANNELS=1           # Single channel only
 export NCCL_MIN_NCHANNELS=1
 # Use shared memory transport first (reduces memory pressure)
 export NCCL_SHM_DISABLE=0
 export NCCL_P2P_LEVEL=NVL             # Use NVLink if available
 # Reduce NCCL's graph memory
 export NCCL_GRAPH_MIXING_SUPPORT=0
+export NCCL_IB_DISABLE=1              # Disable IB, use TCP only
+export NCCL_SOCKET_IFNAME=lo          # Use localhost
 
-# CUDA settings
+# CUDA settings - limit memory allocation
 export CUDA_DEVICE_MAX_CONNECTIONS=1  # Reduce connection overhead
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}
+# Limit CUDA memory allocation per process (leave some for NCCL)
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF},max_split_size_mb:256"
+export CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=100
+export CUDA_MPS_PINNED_MEMORY_SIZE=0
+
+# Additional memory limits
+export MALLOC_ARENA_MAX=1             # Limit glibc arenas
+export OMP_NUM_THREADS=1              # Single thread per process
+export MKL_NUM_THREADS=1
 
 # System limits
 ulimit -n 65535 2>/dev/null || true
@@ -338,6 +350,18 @@ echo "Starting Training on ${NUM_GPUS}x GPUs..."
 echo "(Using PyTorch FSDP instead of DeepSpeed to avoid memory issues)"
 echo ""
 
+# Optional: Run import test
+if [ "${RUN_IMPORT_TEST:-0}" = "1" ]; then
+    echo "Running import test..."
+    python3 test_imports.py || { echo "Import test failed"; exit 1; }
+fi
+
+# Optional: Run single GPU test
+if [ "${RUN_SINGLE_GPU_TEST:-0}" = "1" ]; then
+    echo "Running single GPU test..."
+    python3 test_single_gpu.py || { echo "Single GPU test failed"; exit 1; }
+fi
+
 # Launch with torchrun (native PyTorch distributed)
 torchrun \
     --standalone \
@@ -349,6 +373,7 @@ torchrun \
 
 echo "============================================"
 echo "Training Complete!"
+echo "Model: $MODEL_SIZE"
 echo "Adapter saved to: ./output"
 echo "Next: python merge.py $MODEL_SIZE"
 echo "============================================"
