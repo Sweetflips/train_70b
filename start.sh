@@ -154,8 +154,8 @@ export MALLOC_CONF="dirty_decay_ms:1000,muzzy_decay_ms:1000"
 
 # Use DeepSpeed ZeRO-3 to shard model across 8 GPUs (prevents OOM)
 # DeepSpeed handles model partitioning, preventing 8x CPU RAM usage
+# NOTE: --multi_gpu and --use_deepspeed are mutually exclusive
 accelerate launch \
-    --multi_gpu \
     --num_processes 8 \
     --use_deepspeed \
     --deepspeed_config_file ds_config.json \
