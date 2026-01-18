@@ -21,8 +21,14 @@ pip install -q torch transformers datasets accelerate peft trl bitsandbytes hugg
 
 # Step 2: Download models
 echo "[2/4] Downloading Qwen models from HuggingFace..."
+export HUGGING_FACE_HUB_TOKEN="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"
 python3 << 'EOF'
-from huggingface_hub import snapshot_download
+import os
+from huggingface_hub import snapshot_download, login
+
+token = os.getenv("HUGGING_FACE_HUB_TOKEN")
+if token:
+    login(token=token)
 
 models = [
     "Qwen/Qwen2.5-Coder-14B-Instruct",
