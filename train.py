@@ -36,14 +36,11 @@ def main():
         bnb_4bit_use_double_quant=True
     )
 
-    # Use low_cpu_mem_usage and device_map to prevent OOM during model loading
-    from accelerate import Accelerator
-    accelerator = Accelerator()
-    
+    # Use low_cpu_mem_usage to prevent OOM during model loading
+    # DeepSpeed will handle device placement, so don't use device_map here
     model = AutoModelForCausalLM.from_pretrained(
         MODEL,
         quantization_config=bnb_config,
-        device_map={"": accelerator.local_process_index},  # Map each process to its GPU
         trust_remote_code=True,
         dtype=torch.bfloat16,
         low_cpu_mem_usage=True,  # Critical: prevents RAM spike during loading
