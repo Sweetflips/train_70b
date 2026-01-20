@@ -1,8 +1,15 @@
 venv/
 output/
 merged/
+merged_model/
+gguf_model/
 *.jsonl
+*.gguf
 __pycache__/
 *.pyc
 .DS_Store
-tokenized_data
+tokenized_data/
+*.safetensors
+*.bin
+*.pt
+*.pth
