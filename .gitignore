@@ -5,3 +5,4 @@ merged/
 __pycache__/
 *.pyc
 .DS_Store
+tokenized_data

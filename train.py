@@ -207,7 +207,7 @@ def main():
     torch.distributed.barrier()
     log(local_rank, "MODEL: all ranks have loaded model")
     
-    # Setup LoRA - enable gradient checkpointing BEFORE LoRA to save memory
+    # Setup LoRA with gradient checkpointing for 4096 seq length
     # NOTE: Model is still on CPU at this point - FSDP will move to GPU after wrapping
     log(local_rank, "LORA: configuring...")
     model.gradient_checkpointing_enable()
@@ -240,22 +240,23 @@ def main():
     log(local_rank, "CONFIG: creating SFTConfig (memory-optimized)...")
 
     # Adjust batch size based on model size
+    # B300 has 275GB VRAM - 8 HOUR TARGET (use 72% headroom)
     if "32b" in MODEL.lower():
-        batch_size = 1  # Very conservative for 32B model
-        grad_accum_steps = 8
-        seq_length = 1024  # Shorter sequences save memory
+        batch_size = 56  # Push higher - we have headroom
+        grad_accum_steps = 1  # NO ACCUM
+        seq_length = 1024  # Short seq for speed
     else:
-        batch_size = 2
-        grad_accum_steps = 4
-        seq_length = 2048
+        batch_size = 72
+        grad_accum_steps = 1
+        seq_length = 1024
 
     sft_config = SFTConfig(
         output_dir="./output",
         num_train_epochs=1,
-        max_seq_length=seq_length,
+        max_length=seq_length,
         per_device_train_batch_size=batch_size,
         gradient_accumulation_steps=grad_accum_steps,
-        learning_rate=2e-5,
+        learning_rate=1e-4,  # Much higher LR for massive batch (768 effective)
         warmup_ratio=0.03,
         bf16=True,
         logging_steps=10,
@@ -264,11 +265,11 @@ def main():
         optim="adamw_torch_fused",
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
-        report_to="none",
+        report_to="none",  # Wandb disabled for now
         packing=False,
         dataset_text_field=None,
-        dataloader_num_workers=0,
-        dataloader_pin_memory=False,
+        dataloader_num_workers=8,  # Use multiple workers
+        dataloader_pin_memory=True,  # Faster GPU transfer
         ddp_find_unused_parameters=False,
         # FSDP for large model sharding (critical for 32B)
         # OPTIMIZED: Use full_shard with auto_wrap for optimal memory distribution
@@ -277,7 +278,6 @@ def main():
             "fsdp_transformer_layer_cls_to_wrap": ["Qwen2DecoderLayer"],
             "fsdp_offload_params": False,  # Keep on GPU for speed
             "fsdp_state_dict_type": "SHARDED_STATE_DICT",  # More memory efficient than FULL_STATE_DICT
-            "fsdp_min_num_params": 1e8,  # Wrap large layers
             "fsdp_use_orig_params": True,  # Better memory efficiency with LoRA
             "fsdp_sync_module_states": True,  # Ensure consistency across ranks
         },
@@ -293,7 +293,7 @@ def main():
             model=model,
             args=sft_config,
             train_dataset=dataset,
-            tokenizer=tokenizer,
+            processing_class=tokenizer,
         )
         log(local_rank, "TRAINER: OK")
     except Exception as e:
@@ -309,10 +309,15 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.synchronize(device)
 
-    # Train
+    # Train - resume from checkpoint if available
+    checkpoint_path = "./output/checkpoint-1000"
+    resume_from_checkpoint = checkpoint_path if os.path.exists(checkpoint_path) else None
+    if resume_from_checkpoint and local_rank == 0:
+        log(local_rank, f"TRAIN: resuming from {resume_from_checkpoint}")
+    
     log(local_rank, "TRAIN: starting...")
     try:
-        trainer.train()
+        trainer.train(resume_from_checkpoint=resume_from_checkpoint)
         log(local_rank, "TRAIN: completed!")
     except Exception as e:
         log(local_rank, f"TRAIN: FAILED - {type(e).__name__}: {e}")
